@@ -3,12 +3,14 @@
 //! The ADDRESS a DB cluster and its instances announce, end to end over the awsQuery wire.
 //!
 //! The rule under test: `DBCluster$Endpoint` / `Endpoint$Address` is the host a client
-//! connects to and `DBCluster$Port` / `Endpoint$Port` is "the port that the database engine
-//! is listening on", so the pair a cluster reports is the address this emulator is actually
-//! reached at — a bare host with no scheme and no port of its own, plus the port this
-//! process listens on, whatever port the request asked for. That is what makes
-//! `https://<Endpoint>:<Port>` an address the Neptune data plane (`neptunedata`, which is
-//! addressed at the cluster's own endpoint and nowhere else) answers on.
+//! connects to — the address this emulator is actually reached at, a bare host with no scheme
+//! and no port of its own.
+//!
+//! IaC-Eval fork (P4): `DBCluster$Port` is the port the request asked for, else the documented
+//! default (`CreateDBCluster$Port`: "Default: 8182"), and an instance reports its cluster's
+//! port (`CreateDBInstance$Port`: "Not applicable. The port is managed by the DB cluster.").
+//! Upstream announced this emulator's own API port instead, so that `https://<Endpoint>:<Port>`
+//! reached the Neptune data plane; with the fork it no longer does.
 //!
 //! Only an emulator served on no port at all — an in-process call with no socket behind it —
 //! has no address of this process to announce; there the AWS-shaped DNS host and the
@@ -48,7 +50,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: None,
             requested_port: None,
             expected_host: "127.0.0.1",
-            expected_port: "9297",
+            expected_port: "8182",
         },
         AddressCase {
             name: "an ephemeral data port, with the request asking for the engine port",
@@ -56,7 +58,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: None,
             requested_port: Some("8182"),
             expected_host: "127.0.0.1",
-            expected_port: "44903",
+            expected_port: "8182",
         },
         AddressCase {
             name: "loopback by name, with the request asking for another port",
@@ -64,7 +66,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: None,
             requested_port: Some("9999"),
             expected_host: "localhost",
-            expected_port: "41509",
+            expected_port: "9999",
         },
         AddressCase {
             name: "an IPv6 loopback literal, whose own colons live inside its brackets",
@@ -72,7 +74,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: None,
             requested_port: None,
             expected_host: "[::1]",
-            expected_port: "38001",
+            expected_port: "8182",
         },
         AddressCase {
             name: "an authority that names no port, which https dials on 443",
@@ -80,7 +82,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: None,
             requested_port: None,
             expected_host: "127.0.0.1",
-            expected_port: "443",
+            expected_port: "8182",
         },
         AddressCase {
             name: "an in-process call on an emulator that IS served on a port",
@@ -88,7 +90,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: Some("https://127.0.0.1:9297"),
             requested_port: Some("8182"),
             expected_host: "127.0.0.1",
-            expected_port: "9297",
+            expected_port: "8182",
         },
         AddressCase {
             name: "a request that addressed an AWS host on an emulator served on a port",
@@ -96,7 +98,7 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             served_base: Some("https://127.0.0.1:35117"),
             requested_port: None,
             expected_host: "127.0.0.1",
-            expected_port: "35117",
+            expected_port: "8182",
         },
     ];
 
@@ -159,8 +161,8 @@ async fn a_cluster_announces_the_address_this_emulator_is_reached_at() {
             dialled.port_u16()
         );
 
-        // An instance of the cluster is reached at the same address, whatever port it asks
-        // for: one process serves both.
+        // An instance of the cluster is reached at the same host and reports its cluster's
+        // port, whatever port it asks for (IaC-Eval fork, P4).
         let instance = format!("{identifier}-1");
         let created_instance = call(
             &neptune,

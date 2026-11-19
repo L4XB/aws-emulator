@@ -10,6 +10,9 @@
 //! address this process does not answer on therefore makes the whole data plane
 //! unreachable.
 //!
+//! IaC-Eval fork (P4): the PORT announced is the one the request asked for, else the
+//! documented default 8182, in every case; only the HOST still follows the rule below.
+//!
 //! So the pair announced is the address this emulator is REACHED at whenever it has one,
 //! and the AWS-shaped DNS host with the documented engine port only on an emulator that is
 //! served on no port at all — an in-process call with no socket behind it, where there is
@@ -56,10 +59,16 @@ pub fn announced_cluster_address(
     requested_port: Option<i32>,
 ) -> ClusterAddress {
     match served_address(ctx) {
-        Some((host, port)) => ClusterAddress {
+        // IaC-Eval fork (P4): the PORT is the one the request asked for, else the documented
+        // engine default — `CreateDBCluster$Port`: "The port number on which the instances in
+        // the DB cluster accept connections. Default: 8182" — not this emulator's own API
+        // port, which no `CreateDBCluster` ever asked for. The host is still the address this
+        // emulator is reached at (upstream's choice), so `<Endpoint>:<Port>` no longer
+        // dials the emulator's data plane.
+        Some((host, _served_port)) => ClusterAddress {
             endpoint: host.clone(),
             reader_endpoint: host,
-            port,
+            port: requested_port.unwrap_or(super::DEFAULT_PORT),
         },
         None => ClusterAddress {
             endpoint: cluster_dns_name(identifier, endpoint_token, region, "cluster-"),
@@ -80,7 +89,10 @@ pub fn announced_instance_address(
     cluster_port: i32,
 ) -> (String, i32) {
     match served_address(ctx) {
-        Some((host, port)) => (host, port),
+        // IaC-Eval fork (P4): the instance reports its cluster's port —
+        // `CreateDBInstance$Port`: "Not applicable. The port is managed by the DB cluster."
+        // — rather than this emulator's own API port.
+        Some((host, _served_port)) => (host, cluster_port),
         None => (
             // An instance in a cluster inherits the cluster's endpoint shard label; only
             // its own DNS label differs.

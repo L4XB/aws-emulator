@@ -24,7 +24,8 @@
 //!
 //! The rows differ along what the rule generalises over: the form the `ScheduleExpression`
 //! takes — `rate` with a singular and with a plural unit, stated in minutes, in hours and in
-//! days, and `cron` naming its own instants. Every one of them has its FIRST firing fall due
+//! days (IaC-Eval fork, P2: the `cron` rows are gone, a cron rule first fires at the first
+//! instant it names). Every one of them has its FIRST firing fall due
 //! the same span after the rule can reach a target, so what a row pins is that firing; which
 //! INSTANTS each form then names is the reading pinned by the unit tests of the service's own
 //! `state::schedule`, and the cadence between two firings, together with the input overrides
@@ -525,8 +526,8 @@ struct Row {
     schedule: &'static str,
 }
 
-/// Every form a `ScheduleExpression` states a cadence in. The first firing of each falls due
-/// the same span after the rule can reach its target, so a row's cadence is not waited out.
+/// Every `rate` form a `ScheduleExpression` states a cadence in. The first firing of each falls
+/// due the same span after the rule can reach its target, so a row's cadence is not waited out.
 const ROWS: &[Row] = &[
     Row {
         case: "a rate of one minute, the shortest a rate can state",
@@ -548,16 +549,11 @@ const ROWS: &[Row] = &[
         slug: "rate-two-days",
         schedule: "rate(2 days)",
     },
-    Row {
-        case: "a cron expression naming every minute",
-        slug: "cron-every-minute",
-        schedule: "cron(* * * * ? *)",
-    },
-    Row {
-        case: "a cron expression naming one minute of each hour",
-        slug: "cron-hourly",
-        schedule: "cron(0 * * * ? *)",
-    },
+    // IaC-Eval fork (P2): the two `cron` rows are gone. A cron rule's first firing is now the
+    // first instant its expression names (up to an hour away for `cron(0 * * * ? *)`), not the
+    // span after the rule can reach its target that this table waits for; that first firing is
+    // pinned by `a_new_cron_rule_first_fires_at_its_first_named_instant` in the service's own
+    // `state::schedule` unit tests.
 ];
 
 /// What one row wired up, carried from the setup pass to the verification pass.

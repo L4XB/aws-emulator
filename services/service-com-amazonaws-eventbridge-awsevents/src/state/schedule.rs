@@ -28,11 +28,13 @@
 //! The `ScheduleExpression` decides it: a `rate(<value> <unit>)` fires every `value` units,
 //! and a `cron(<six fields>)` fires at the instants that expression names, read through the
 //! maintained `cron` crate rather than a hand-written parser. The CADENCE is the caller's
-//! own figure and keeps its value. WHEN the first firing of a new rule falls is not something
-//! the expression states — AWS aligns a rate rule's firings to its own clock, so the first
-//! one lands somewhere inside the first period — and this emulator makes it due
+//! own figure and keeps its value. WHEN the first firing of a new RATE rule falls is not
+//! something the expression states — AWS aligns a rate rule's firings to its own clock, so the
+//! first one lands somewhere inside the first period — and this emulator makes it due
 //! [`FIRST_FIRING_DELAY`] after the rule became schedulable, which is inside that span for
-//! every rate a caller can write.
+//! every rate a caller can write. A CRON rule's first firing is the first instant its
+//! expression names (IaC-Eval fork, P2: upstream fired it [`FIRST_FIRING_DELAY`] after
+//! creation as well; see `Schedule::first_after`).
 //!
 //! A firing that was due while nothing was running is not replayed: "EventBridge doesn't
 //! guarantee that a rule fires at a precise time", and a schedule that fell many periods
@@ -173,7 +175,9 @@ impl Schedules {
                 // A rule the clock has not seen yet: its first firing falls due ahead of
                 // now, so it is not fired the instant it was created.
                 None => {
-                    known.insert(rule.rule_arn.clone(), after(now, FIRST_FIRING_DELAY));
+                    if let Some(first) = rule.schedule.first_after(now) {
+                        known.insert(rule.rule_arn.clone(), first);
+                    }
                     continue;
                 }
             };
@@ -181,12 +185,15 @@ impl Schedules {
                 known.insert(rule.rule_arn.clone(), due);
                 continue;
             }
-            // A schedule with no instant ahead of now fires no more: it keeps no due instant,
-            // so the clock neither fires it nor looks at it again.
+            // The firing that fell due is performed. A schedule with no instant ahead of now
+            // fires no more AFTER it: it keeps no due instant, so the clock does not fire it
+            // again. (IaC-Eval fork, P2: upstream also skipped the due firing itself, so the
+            // last instant a cron expression names — the only one of `cron(2 17 19 11 ? 2026)`
+            // — never fired once the first firing fell on it.)
             if let Some(next) = rule.schedule.next_after(due, now) {
                 known.insert(rule.rule_arn.clone(), next);
-                firing.push(rule.clone());
             }
+            firing.push(rule.clone());
         }
         // A rule that is no longer schedulable — deleted, disabled, or no longer carrying a
         // schedule — keeps no due instant, so re-enabling one starts its schedule afresh.
@@ -236,6 +243,24 @@ impl Schedule {
             .strip_prefix("cron(")
             .and_then(|rest| rest.strip_suffix(')'))?;
         cron(body).map(|schedule| Self::Cron(Box::new(schedule)))
+    }
+
+    /// IaC-Eval fork (P2): the instant the FIRST firing of a rule that became schedulable at
+    /// `now` falls on, or `None` when the schedule names no instant ahead of `now`.
+    ///
+    /// A `rate` rule keeps upstream's [`FIRST_FIRING_DELAY`]: no rate expression states an
+    /// instant of its own. A `cron` rule does: "Rules with `ScheduleExpressions`
+    /// self-trigger based on the given schedule" (`PutRule`), so its first firing is the
+    /// first instant the expression names after `now`, read in UTC like every later one
+    /// ([`Self::next_after`]), and not [`FIRST_FIRING_DELAY`] after the rule appeared.
+    fn first_after(&self, now: SystemTime) -> Option<SystemTime> {
+        match self {
+            Self::Rate(_) => Some(after(now, FIRST_FIRING_DELAY)),
+            Self::Cron(schedule) => {
+                let from: ::chrono::DateTime<::chrono::Utc> = now.into();
+                schedule.after(&from).next().map(SystemTime::from)
+            }
+        }
     }
 
     /// The instant the firing AFTER the one that was due at `due` falls on, given that the
@@ -773,6 +798,98 @@ mod tests {
         assert!(
             again.is_empty(),
             "expected one firing per due instant, got {again:?}"
+        );
+    }
+
+    /// IaC-Eval fork (P2): a NEW cron rule first fires at the first instant its expression
+    /// names (UTC), not [`FIRST_FIRING_DELAY`] after it appeared, and a rule whose next
+    /// instant lies an hour ahead stays silent until then.
+    ///
+    /// The rows differ along how far ahead the first named instant lies (seconds, an hour, a
+    /// day) and along the expression's form (a fixed minute, a step, a weekday range), so no
+    /// firing time can be the creation time plus a constant.
+    #[test]
+    fn a_new_cron_rule_first_fires_at_its_first_named_instant() {
+        // 2026-11-19 17:01:30 UTC, a Thursday.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_795_107_690);
+        let minute = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let cases: &[(&str, &str, SystemTime)] = &[
+            // 17:02:00 UTC the same day: thirty seconds ahead.
+            ("the next minute", "cron(2 17 19 11 ? 2026)", minute(1_795_107_720)),
+            // 18:02:00 UTC the same day: an hour ahead.
+            ("an hour ahead", "cron(2 18 19 11 ? 2026)", minute(1_795_111_320)),
+            // Every fifteen minutes: 17:15:00 UTC.
+            ("a step", "cron(0/15 * * * ? *)", minute(1_795_108_500)),
+            // 08:00 UTC on weekdays: Friday 2026-11-20.
+            ("a weekday range", "cron(0 8 ? * MON-FRI *)", minute(1_795_161_600)),
+        ];
+        for (case, expression, expected_first) in cases {
+            let schedule = Schedule::parse(expression)
+                .unwrap_or_else(|| panic!("case {case:?}: {expression:?} must parse"));
+            let rule = Schedulable {
+                region: "us-east-1".to_string(),
+                bus: "default".to_string(),
+                rule: "nightly".to_string(),
+                rule_arn: "arn:aws:events:us-east-1:000000000000:rule/nightly".to_string(),
+                schedule,
+            };
+            let mut schedules = Schedules::default();
+            let seen = schedules.take_due(::std::slice::from_ref(&rule), now);
+            assert!(
+                seen.is_empty(),
+                "case {case:?}: a rule the clock has just seen must not fire, got {seen:?}"
+            );
+            // Upstream fired every new rule here; a cron rule must stay silent until its
+            // own instant.
+            let at_upstream_delay =
+                schedules.take_due(::std::slice::from_ref(&rule), now + FIRST_FIRING_DELAY);
+            assert!(
+                at_upstream_delay.is_empty(),
+                "case {case:?}: {expression:?} must not fire {FIRST_FIRING_DELAY:?} after \
+                 creation, got {at_upstream_delay:?}"
+            );
+            let just_before = *expected_first - Duration::from_millis(1);
+            let early = schedules.take_due(::std::slice::from_ref(&rule), just_before);
+            assert!(
+                early.is_empty(),
+                "case {case:?}: {expression:?} must not fire before {expected_first:?}, got \
+                 {early:?}"
+            );
+            let fired = schedules.take_due(::std::slice::from_ref(&rule), *expected_first);
+            assert_eq!(
+                fired.len(),
+                1,
+                "case {case:?}: {expression:?} must fire at {expected_first:?}, got {fired:?}"
+            );
+            // Once, not again on the next ticks: a one-shot expression has nothing ahead, the
+            // recurring ones name nothing within the next two minutes.
+            for later in [1_u64, 60, 120] {
+                let again = schedules.take_due(
+                    ::std::slice::from_ref(&rule),
+                    *expected_first + Duration::from_secs(later),
+                );
+                assert!(
+                    again.is_empty(),
+                    "case {case:?}: {expression:?} must not fire again {later} s later, got \
+                     {again:?}"
+                );
+            }
+        }
+        // A rate rule keeps upstream's first firing.
+        let rate = Schedule::Rate(Duration::from_secs(60));
+        assert_eq!(
+            rate.first_after(now),
+            Some(now + FIRST_FIRING_DELAY),
+            "case {:?}: a rate rule's first firing is unchanged",
+            "rate(1 minute)"
+        );
+        // A cron expression with nothing ahead names no first firing.
+        let exhausted = Schedule::parse("cron(0 20 * * ? 2020)").expect("the expression parses");
+        assert_eq!(
+            exhausted.first_after(now),
+            None,
+            "case {:?}: a schedule with nothing ahead names no first firing",
+            "a year behind the clock"
         );
     }
 }

@@ -1,5 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026-11-19 for the IaC-Eval fork (patch P1): adds the opt-in
+// `Service::serves_anonymous_caller` seam. Every other line is unchanged.
 //! The service contract: the vended traits one emulated service implements.
 //!
 //! - [`Service`] — one emulated service: the routing predicate that claims a
@@ -451,5 +453,24 @@ pub trait Service: Send + Sync + 'static {
     /// service's constructor, never per request.
     fn override_protocol(&self) -> Option<&dyn ServerHttpProtocol> {
         None
+    }
+
+    /// IaC-Eval fork (P1): whether this service serves `req` to a caller that presents NO
+    /// credential, so that its operation, not the router, decides what that caller may do.
+    ///
+    /// Asked only while request authentication is on and no registered authenticator
+    /// recognizes the request. `operation` is the routing key the model resolves for it
+    /// (`None` when it resolves none). Returning `true` lets the request through to the
+    /// operation unauthenticated; the operation must then judge the anonymous caller
+    /// itself. Defaults to `false`, which keeps the router's refusal for every service
+    /// that does not opt in.
+    fn serves_anonymous_caller(
+        &self,
+        parts: &http::request::Parts,
+        req: &RtRequest,
+        operation: Option<&str>,
+    ) -> bool {
+        let _ = (parts, req, operation);
+        false
     }
 }

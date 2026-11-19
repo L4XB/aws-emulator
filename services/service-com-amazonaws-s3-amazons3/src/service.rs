@@ -2402,6 +2402,29 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         let _ = error;
         None
     }
+
+    /// IaC-Eval fork (P1): the requests this service serves to a caller presenting NO
+    /// credential, which an authenticating router would otherwise refuse before any handler
+    /// ran.
+    ///
+    /// Exactly the three surfaces whose handlers already judge the anonymous caller against
+    /// what the bucket grants to everyone ([`crate::state::Bucket::anonymous_object_read_refusal`]):
+    /// an object read (`GetObject`), its metadata (`HeadObject`) — "If you grant READ access
+    /// to the anonymous user, the `GetObject` operation returns the object without using an
+    /// authorization header" (`GetObject`'s own documentation) — and the website endpoint,
+    /// whose every request is anonymous ([`website_endpoint`]). Every other anonymous request
+    /// is still refused by the router, as before: those handlers would read a request with no
+    /// credential as the account's own.
+    fn serves_anonymous_caller(
+        &self,
+        parts: &http::request::Parts,
+        req: &RtRequest,
+        operation: Option<&str>,
+    ) -> bool {
+        crate::state::request_is_anonymous(parts)
+            && (website_endpoint::addressed_bucket_of(req).is_some()
+                || matches!(operation, Some("GetObject" | "HeadObject")))
+    }
 }
 
 /// The model-derived half of this service, DELEGATED to the generated entry — every datum

@@ -687,6 +687,10 @@ async fn an_unsigned_read_is_refused_before_it_says_whether_the_key_is_there() {
 /// signature boundary before any handler sees it, and S3 words THAT refusal the same way:
 /// the `AccessDenied` of its published error list, HTTP 403, with that list's own sentence.
 ///
+/// IaC-Eval fork (P1): an anonymous `GetObject` / `HeadObject` now reaches its handler, which
+/// refuses this bucket's (non-public) object in the same words; the rows below still hold.
+/// See `anonymous_reads_on_an_authenticating_router` for public objects.
+///
 /// What this pins is that an unsigned caller is answered in S3's own words rather than in
 /// the framework's "sign the request" diagnostic, which no S3 client reads: a client
 /// branching on `AccessDenied` and on the "Access Denied" message must take the same branch

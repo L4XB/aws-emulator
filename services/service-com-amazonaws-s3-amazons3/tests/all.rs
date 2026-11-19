@@ -25,6 +25,8 @@ mod account_wide_listing_authorization;
 mod analytics_document_rules;
 #[path = "all/anonymous_object_reads.rs"]
 mod anonymous_object_reads;
+#[path = "all/anonymous_reads_on_an_authenticating_router.rs"]
+mod anonymous_reads_on_an_authenticating_router;
 #[path = "all/announced_response_urls.rs"]
 mod announced_response_urls;
 #[path = "all/aws_published_sample_data.rs"]

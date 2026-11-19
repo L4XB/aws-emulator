@@ -1,5 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+// Modified 2026-11-19 for the IaC-Eval fork (patch P1): `authenticate` asks
+// `Service::serves_anonymous_caller` before refusing a request no authenticator
+// recognizes. Every other line is unchanged.
 //! The multi-service router: the emulator core that mounts N services in one
 //! process and dispatches each request to the one service that claims it.
 
@@ -356,7 +359,20 @@ impl MultiServiceRouter {
         if schemes.is_some_and(<[_]>::is_empty) {
             return Ok(());
         }
-        let authenticator = authenticator_for(&self.authenticators, schemes.unwrap_or(&[]), parts)?;
+        let authenticator = match authenticator_for(&self.authenticators, schemes.unwrap_or(&[]), parts) {
+            Ok(authenticator) => authenticator,
+            // IaC-Eval fork (P1): no registered authenticator recognizes the request, so it
+            // presents no credential this emulator verifies. A service that serves the
+            // anonymous caller for this request (`Service::serves_anonymous_caller`, `false`
+            // unless the service opts in) judges it in its operation instead.
+            Err(denied) => {
+                let operation = wire.protocol().routing_key(rt_req).ok();
+                if svc.serves_anonymous_caller(parts, rt_req, operation) {
+                    return Ok(());
+                }
+                return Err(denied);
+            }
+        };
         let serving = svc.definition().identity().signing_name();
         authenticator.verify(parts, body, serving, &self.credential_store)
     }

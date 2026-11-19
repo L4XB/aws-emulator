@@ -649,10 +649,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The zone an instance launches into must be one the Region has, and the
         // naming rule for those zones lives in one place: `availability_zones_in_region`.
         let zones = availability_zones_in_region(&region);
+        // IaC-Eval fork (P3b, DERIVED, NOT DOCUMENTED): an EMPTY `Placement.AvailabilityZone`
+        // names no zone, so it is read as an absent one ("If you specify neither one, Amazon
+        // EC2 automatically selects an Availability Zone for you", `Placement$AvailabilityZone`),
+        // the same way this operation already reads an empty `GroupName` and `HostId` below.
+        // The AWS provider for Terraform sends `Placement.AvailabilityZone=` for every
+        // `aws_instance` without `availability_zone`.
         let availability_zone = match input
             .placement
             .as_ref()
             .and_then(|placement| placement.availability_zone.clone())
+            .filter(|zone| !zone.is_empty())
         {
             Some(requested) => {
                 crate::state::availability_zone_of_region(
@@ -761,7 +768,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let availability_zone = if input
             .placement
             .as_ref()
-            .is_some_and(|placement| placement.availability_zone.is_some())
+            .is_some_and(|placement| {
+                // IaC-Eval fork (P3b): an empty zone is no zone (see above).
+                placement.availability_zone.as_deref().is_some_and(|zone| !zone.is_empty())
+            })
         {
             availability_zone
         } else {

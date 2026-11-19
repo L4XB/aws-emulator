@@ -27,5 +27,7 @@ mod dax_parameter_group_resolution;
 mod dax_parameter_groups;
 #[path = "all/dax_rejection_paths.rs"]
 mod dax_rejection_paths;
+#[path = "all/dax_subnet_group_deletion.rs"]
+mod dax_subnet_group_deletion;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;

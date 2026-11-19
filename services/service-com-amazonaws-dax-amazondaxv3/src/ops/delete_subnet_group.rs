@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteSubnetGroup
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteSubnetGroup`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IaC-Eval fork (P9): implemented. "Deletes a subnet group. You cannot delete a subnet group
+//! if it is associated with any DAX clusters." (`DeleteSubnetGroup`'s own documentation)
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken". Replace the `Err(..)` in [`DeleteSubnetGroup::handle`] with real behaviour and
@@ -142,18 +141,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteSubnetGroup` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteSubnetGroupErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteSubnetGroup"))
+        let _ = ctx;
+        let state = crate::state::store(&*self.engine, Self::NAME)?;
+        let mut store = state.lock();
+        // Clock-owed transitions first, so a group whose last cluster has finished deleting
+        // is free again (the same order `CreateCluster` reads the store in).
+        store.settle_due(::std::time::SystemTime::now());
+        // Names are stored lower-cased and resolve case-insensitively, as `CreateCluster`
+        // resolves a `SubnetGroupName`.
+        let name = input.subnet_group_name.to_lowercase();
+        if !store.subnet_groups.contains_key(&name) {
+            return Err(DeleteSubnetGroupErrorModeled::SubnetGroupNotFoundFault(
+                crate::state::subnet_group_not_found(),
+            )
+            .into());
+        }
+        // "You cannot delete a subnet group if it is associated with any DAX clusters."
+        if store
+            .clusters
+            .values()
+            .any(|cluster| cluster.subnet_group.as_deref() == Some(name.as_str()))
+        {
+            return Err(DeleteSubnetGroupErrorModeled::SubnetGroupInUseFault(SubnetGroupInUseFault {
+                // The fault's own documentation: "The specified subnet group is currently in
+                // use."
+                message: Some("The specified subnet group is currently in use.".to_string()),
+            })
+            .into());
+        }
+        store.subnet_groups.remove(&name);
+        // `DeletionMessage` is "A user-specified message for this action"; the request
+        // carries none, so none is reported.
+        Ok(DeleteSubnetGroupOutput {
+            deletion_message: None,
+        })
     }
 }

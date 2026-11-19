@@ -1442,7 +1442,7 @@ async fn an_update_applies_only_the_members_it_was_given() {
 async fn the_operations_outside_this_slice_still_answer_not_implemented() {
     let router = emulator();
     // Rows: one operation from each family left to its own gap issue.
-    let cases: [(&str, Value); 4] = [
+    let cases: [(&str, Value); 3] = [
         (
             "DecreaseReplicationFactor",
             json!({ "ClusterName": "demo", "NewReplicationFactor": 1 }),
@@ -1455,7 +1455,8 @@ async fn the_operations_outside_this_slice_still_answer_not_implemented() {
             "TagResource",
             json!({ "ResourceName": "arn:aws:dax:us-west-2:000000000000:cache/demo", "Tags": [] }),
         ),
-        ("DeleteSubnetGroup", json!({ "SubnetGroupName": "sg" })),
+        // IaC-Eval fork (P9): `DeleteSubnetGroup` is implemented, see
+        // `dax_subnet_group_deletion`.
     ];
 
     for (operation, body) in cases {

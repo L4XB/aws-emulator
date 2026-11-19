@@ -86,15 +86,6 @@ const CONFLICT_CASES: &[ConflictCase] = &[
          no-password-required",
     ),
     (
-        "the flag is cleared and the mode asks for a password",
-        &[
-            ("NoPasswordRequired", "false"),
-            ("AuthenticationMode.Type", "password"),
-            ("AuthenticationMode.Passwords.member.1", PASSWORD_TWO),
-        ],
-        "No password required flag is false but provided authentication type is password",
-    ),
-    (
         "passwords beside a mode that asks for no password",
         &[
             ("Passwords.member.1", PASSWORD_TWO),
@@ -279,4 +270,85 @@ async fn a_create_naming_two_authentication_directives_reports_both_of_them() {
             described.body
         );
     }
+}
+
+/// IaC-Eval fork (P5b): a CLEARED `NoPasswordRequired` beside an `AuthenticationMode` of type
+/// `password` is admitted. The flag "Indicates a password is not required for this user"
+/// (`CreateUser$NoPasswordRequired`), so `false` states nothing that contradicts a mode
+/// supplying the passwords ("Specifies the passwords to use for authentication if Type is set
+/// to password", `AuthenticationMode$Passwords`). It is what the AWS provider for Terraform
+/// sends for every `aws_elasticache_user` with password authentication.
+///
+/// The rows differ in the entry point (`CreateUser`, `ModifyUser`) and in the number of
+/// passwords (one, two); the user must authenticate with exactly the passwords the mode named.
+#[tokio::test]
+async fn a_cleared_flag_beside_a_password_mode_is_admitted() {
+    let emulator = Emulator::new();
+    let created_cases: [(&str, &[&str]); 2] = [
+        ("one password", &[PASSWORD]),
+        ("two passwords", &[PASSWORD, PASSWORD_TWO]),
+    ];
+    for (index, (case, passwords)) in created_cases.iter().enumerate() {
+        let id = format!("cleared-flag-{index}");
+        let mut request = params(&[
+            ("UserId", id.as_str()),
+            ("UserName", id.as_str()),
+            ("Engine", "redis"),
+            ("AccessString", CREATED_ACCESS_STRING),
+            ("NoPasswordRequired", "false"),
+            ("AuthenticationMode.Type", "password"),
+        ]);
+        let members: Vec<(String, String)> = passwords
+            .iter()
+            .enumerate()
+            .map(|(n, password)| {
+                (
+                    format!("AuthenticationMode.Passwords.member.{}", n + 1),
+                    (*password).to_string(),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = members
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        request.extend(params(&borrowed));
+        let created = emulator.call("CreateUser", &request).await;
+        let count = passwords.len().to_string();
+        assert_eq!(
+            (
+                created.status,
+                created.text("Authentication/Type"),
+                created.text("Authentication/PasswordCount")
+            ),
+            (200, Some("password"), Some(count.as_str())),
+            "case {case:?}: CreateUser with NoPasswordRequired=false and a password mode must \
+             be served, got {} {}",
+            created.status,
+            created.body
+        );
+    }
+
+    // The same pairing on a modify of an existing password user.
+    seed_user(&emulator, "cleared-flag-modify").await;
+    let modified = emulator
+        .call(
+            "ModifyUser",
+            &params(&[
+                ("UserId", "cleared-flag-modify"),
+                ("NoPasswordRequired", "false"),
+                ("AuthenticationMode.Type", "password"),
+                ("AuthenticationMode.Passwords.member.1", PASSWORD_TWO),
+            ]),
+        )
+        .await;
+    assert_eq!(
+        (modified.status, modified.text("Authentication/Type")),
+        (200, Some("password")),
+        "case {:?}: ModifyUser with NoPasswordRequired=false and a password mode must be \
+         served, got {} {}",
+        "modify",
+        modified.status,
+        modified.body
+    );
 }

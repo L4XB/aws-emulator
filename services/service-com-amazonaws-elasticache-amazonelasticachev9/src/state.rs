@@ -3611,7 +3611,17 @@ pub fn authentication_from_request(
                 )))
             }
         };
-        if !passwords.is_empty() || no_password_required.is_some() {
+        // IaC-Eval fork (P5b): `NoPasswordRequired` "Indicates a password is not required
+        // for this user", so `false` states nothing that contradicts a PASSWORD mode — the
+        // mode supplies the passwords the flag leaves required. Only that one pairing is
+        // admitted (it is what every `aws_elasticache_user` with password authentication
+        // sends); every other pairing of the flag with a mode is refused as upstream did.
+        let flag_contradicts_mode = match no_password_required {
+            Some(false) => mode_type != input_authentication_type::PASSWORD,
+            Some(true) => true,
+            None => false,
+        };
+        if !passwords.is_empty() || flag_contradicts_mode {
             // Two statements of how the user authenticates: the refusal is built
             // from the pair the request submitted, not from the rule alone.
             return Err(AuthRefusal::Combination(conflicting_authentication_message(

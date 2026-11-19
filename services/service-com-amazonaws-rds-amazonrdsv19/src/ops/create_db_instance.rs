@@ -357,6 +357,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // IaC-Eval fork (P3, DERIVED, NOT DOCUMENTED): an EMPTY `EngineVersion` names no
+        // version, so it is read as an absent one, which resolves to the engine's default
+        // version below (the same row `DescribeDBEngineVersions --default-only` reports).
+        // AWS documents `EngineVersion` as optional but says nothing about an empty value;
+        // the reading follows from the AWS provider for Terraform, which sends
+        // `EngineVersion=` for every `aws_db_instance` without `engine_version`.
+        let mut input = input;
+        if input.engine_version.as_deref().is_some_and(str::is_empty) {
+            input.engine_version = None;
+        }
         let region = crate::state::request_region(ctx)
             .map_err(CreateDBInstanceError::validation)?;
 

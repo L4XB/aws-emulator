@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/cluster_instance_types.rs"]
 mod cluster_instance_types;
+#[path = "all/cognito_options_reported.rs"]
+mod cognito_options_reported;
 #[path = "all/compatible_versions.rs"]
 mod compatible_versions;
 #[path = "all/describe_domains_batch.rs"]

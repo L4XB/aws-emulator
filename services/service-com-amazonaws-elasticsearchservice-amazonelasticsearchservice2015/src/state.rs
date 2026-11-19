@@ -868,7 +868,21 @@ impl Domain {
             access_policies: config.access_policies.as_ref().map(|r| r.value.clone()),
             snapshot_options: config.snapshot_options.as_ref().map(|r| r.value.clone()),
             vpc_options: config.vpc_options.as_ref().map(|r| r.value.clone()),
-            cognito_options: config.cognito_options.as_ref().map(|r| r.value.clone()),
+            // IaC-Eval fork (P3c, DERIVED, NOT DOCUMENTED): a domain configured without Cognito
+            // still reports `CognitoOptions`, with `Enabled` false, rather than omitting the
+            // member. The API reference does not say the member is always present; the AWS
+            // provider for Terraform dereferences it on every read of an
+            // `aws_elasticsearch_domain` and crashed on its absence.
+            cognito_options: Some(
+                config
+                    .cognito_options
+                    .as_ref()
+                    .map(|r| r.value.clone())
+                    .unwrap_or_else(|| CognitoOptions {
+                        enabled: Some(false),
+                        ..CognitoOptions::default()
+                    }),
+            ),
             encryption_at_rest_options: config
                 .encryption_at_rest_options
                 .as_ref()

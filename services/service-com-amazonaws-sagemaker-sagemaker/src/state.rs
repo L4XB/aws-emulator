@@ -1400,6 +1400,11 @@ tag_accessors!(
     code_repositories,
     compute_quotas,
     contexts,
+    // IaC-Eval fork (P5a): a Studio domain carries an `arn` and the `tags` its create
+    // stored ("`tags` is stored so a later `ListTags` reports what the create carried",
+    // [`domain::Domain`]) but was missing here, so `ListTags` on a fresh domain's ARN was
+    // refused as a resource that does not exist.
+    domains,
     endpoint_configs,
     endpoints,
     experiments,

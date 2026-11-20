@@ -466,6 +466,16 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 debug = false
 
+# IaC-Eval fork (build only, no behavior change): the router crate instantiates every
+# service, so rustc compiles the whole emulator once more inside it. At the release default
+# (opt-level 3, 16 codegen units) it needs more memory than the 12.4 GiB Docker VM the fork
+# is built in, and was SIGKILLed even alone with 256 codegen units. This override lowers the
+# optimization of this one crate only; every other crate keeps the release default.
+[profile.release.package.aws-emulator-router]
+opt-level = 1
+codegen-units = 256
+debug = 0
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

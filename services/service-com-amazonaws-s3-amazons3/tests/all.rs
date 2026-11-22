@@ -451,6 +451,8 @@ mod scalar_query_parameters;
 mod scratch_probe;
 #[path = "all/served_envelope_values.rs"]
 mod served_envelope_values;
+#[path = "all/server_access_logs.rs"]
+mod server_access_logs;
 #[path = "all/service_principal_object_access.rs"]
 mod service_principal_object_access;
 #[path = "all/service_set_tag_keys.rs"]

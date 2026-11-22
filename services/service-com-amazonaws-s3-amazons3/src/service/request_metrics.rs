@@ -458,7 +458,7 @@ fn carried_bytes(body: Option<&[u8]>) -> Option<usize> {
 /// so the bucket is put back in front of it — the same normalization the routing seam reads an
 /// address with ([`super::EmulatedService::path_style_path`]), so the bucket a request is
 /// SERVED for and the bucket its answer is counted into cannot differ.
-fn path_style_path<'r, Eng: Send + Sync + 'static>(
+pub(super) fn path_style_path<'r, Eng: Send + Sync + 'static>(
     engine: &Eng,
     req: &'r RtRequest,
 ) -> Cow<'r, str> {
@@ -776,7 +776,7 @@ fn meter<Eng, O>(
         ),
         None => Box::new(Metered::new(operation, Arc::clone(engine), kind)),
     };
-    table.add_operation(O::NAME, entry);
+    table.add_operation(O::NAME, super::server_access_logs::wrap(O::NAME, entry, engine));
 }
 
 #[cfg(test)]

@@ -2090,6 +2090,12 @@ fn the_lifecycle_document_schema_tables_match_the_model() {
 
 #[tokio::test]
 async fn current_expiration_leaves_one_marker_and_preserves_the_source_version() {
+    for query in ["versions", "versions&encoding-type=url"] {
+        verify_current_expiration_inventory(query).await;
+    }
+}
+
+async fn verify_current_expiration_inventory(query: &str) {
     let (router, engine) = super::bucket_lifecycle::router_with_engine();
     let name = "expiration-effect";
     service_com_amazonaws_s3_amazons3::state::service_state(&*engine).unwrap().lock()
@@ -2111,7 +2117,7 @@ async fn current_expiration_leaves_one_marker_and_preserves_the_source_version()
     assert_eq!(wrong_owner.status, 403);
     assert_eq!(get_object(&router, name, "tmp/source", "", &[]).await.status, 200);
     // SDKs may request URL encoding of the returned key names, which leaves scope unchanged.
-    for query in ["versions&encoding-type=url", "versions"] {
+    for _ in 0..2 {
         let listed = send(&router, "GET", &format!("/{name}?{query}"), &[], "").await;
         assert_eq!(listed.status, 200);
         assert_eq!(text(&listed).matches("<DeleteMarker>").count(), 1);

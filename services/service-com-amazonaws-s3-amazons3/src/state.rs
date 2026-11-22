@@ -3855,16 +3855,12 @@ pub const LIFECYCLE_RULE_ENABLED: &str = "Enabled";
 /// UTC of the following day, which is why an action's date is always a midnight and never
 /// the time of day the write happened to land on.
 fn midnight_after_days(from: SystemTime, days: i32) -> Option<SystemTime> {
-    let from = i64::try_from(
-        from.duration_since(SystemTime::UNIX_EPOCH)
-            .ok()?
-            .as_secs(),
-    )
-    .ok()?;
+    let elapsed = from.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    let from = i64::try_from(elapsed.as_secs()).ok()?;
     let due = from.checked_add(i64::from(days).checked_mul(SECONDS_PER_DAY)?)?;
     let whole_days = due.div_euclid(SECONDS_PER_DAY);
     // Already a midnight: there is nothing to round up to.
-    let midnight = if due.rem_euclid(SECONDS_PER_DAY) == 0 {
+    let midnight = if due.rem_euclid(SECONDS_PER_DAY) == 0 && elapsed.subsec_nanos() == 0 {
         whole_days
     } else {
         whole_days.checked_add(1)?

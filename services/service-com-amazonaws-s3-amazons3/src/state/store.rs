@@ -8,6 +8,8 @@ use super::*;
 /// Per-service state for com-amazonaws-s3-amazons3. A handler reaches it through [`service_state`].
 #[derive(Debug)]
 pub struct ComAmazonawsS3Amazons3State {
+    /// Exact bucket selected by the operator for experimental read-triggered expiration.
+    pub(super) current_expiration_bucket: Option<String>,
     /// Buckets by name.
     ///
     /// Keyed by name ALONE because that is the scope of S3's bucket namespace: "General
@@ -169,6 +171,7 @@ impl Default for ComAmazonawsS3Amazons3State {
     /// for a managed name.
     fn default() -> Self {
         let mut store = Self {
+            current_expiration_bucket: std::env::var("AWS_EMULATOR_EXPERIMENTAL_S3_CURRENT_EXPIRATION_BUCKET").ok(),
             buckets: BTreeMap::new(),
             minted_versions: 0,
             minted_notification_configuration_ids: 0,
@@ -2217,14 +2220,23 @@ impl ComAmazonawsS3Amazons3State {
     /// once the whole store holds [`MAX_OBJECTS_TOTAL`] versions, and the per-bucket
     /// ceiling is checked inside. Nothing is written when the answer is a ceiling.
     pub fn remove_object(&mut self, bucket: &str, key: &str) -> Option<ObjectDeletion> {
+        self.remove_object_at(bucket, key, SystemTime::now())
+    }
+
+    fn remove_object_at(
+        &mut self,
+        bucket: &str,
+        key: &str,
+        now: SystemTime,
+    ) -> Option<ObjectDeletion> {
         let held = self.buckets.get(bucket)?;
         let versioned = held.versioning_enabled();
         // Only a delete that lays a marker the store does not already hold a slot for adds
         // an entry: a bucket with no versioning state takes one away, and a `null` marker
         // displaces the `null` version it covers. Just that case is bounded here, and only
         // that case pays for the pass over every bucket.
-        let adds_version = held.versioning.is_some()
-            && (versioned || held.null_version_position(key).is_none());
+        let adds_version =
+            held.versioning.is_some() && (versioned || held.null_version_position(key).is_none());
         if adds_version {
             let held_versions: usize = self.caller_stored_versions();
             if held_versions >= MAX_OBJECTS_TOTAL {
@@ -2239,7 +2251,64 @@ impl ComAmazonawsS3Amazons3State {
         });
         self.buckets
             .get_mut(bucket)
-            .map(|held| held.remove_object(key, minted))
+            .map(|held| held.remove_object(key, minted, now))
+    }
+
+    /// Select one disposable bucket for current-expiration calibration in this engine.
+    /// No wire operation can set this value. None is the default and disables execution.
+    pub fn set_experimental_current_expiration_bucket(&mut self, name: Option<String>) {
+        self.current_expiration_bucket = name;
+    }
+
+    /// Advance the experimental small-bucket inventory under the caller's store lock.
+    /// An exact key selection is supported for isolated store-level calibration.
+    pub(crate) fn expire_current_objects(
+        &mut self,
+        bucket: &str,
+        key: Option<&str>,
+        now: SystemTime,
+    ) {
+        if self.current_expiration_bucket.as_deref() != Some(bucket) {
+            return;
+        }
+        let Some(held) = self.buckets.get(bucket) else {
+            return;
+        };
+        if held.versions.len() > 64
+            || held.lifecycle().is_none()
+            || held.is_directory()
+            || held.object_lock_enabled()
+            || held.notification_configuration().event_bridge_enabled
+            || held.notification_configuration().targets().next().is_some()
+            || held.replication().is_some()
+            || (held.versioning.is_some() && !held.versioning_enabled())
+        {
+            return;
+        }
+        let due = |key: &str| {
+            held.object(key).is_some_and(|object| {
+                object.replication.is_none()
+                    && object.legal_hold.is_none()
+                    && object.retention.is_none()
+                    && held
+                        .object_expiration(key, object)
+                        .is_some_and(|expiration| expiration.expires_at <= now)
+            })
+        };
+        if let Some(key) = key {
+            if due(key) {
+                self.remove_object_at(bucket, key, now);
+            }
+            return;
+        }
+        let keys: Vec<String> = held.versions.keys().filter(|key| due(key)).cloned().collect();
+        for key in keys {
+            if matches!(self.remove_object_at(bucket, &key, now),
+                Some(ObjectDeletion::VersionCountReached | ObjectDeletion::TotalVersionCountReached))
+            {
+                break;
+            }
+        }
     }
 
     /// Remove the version of `key` that `version_id` names from the bucket named
@@ -2272,6 +2341,9 @@ impl ComAmazonawsS3Amazons3State {
         let Some(mut held) = self.buckets.remove(bucket_name) else {
             return BucketRemoval::default();
         };
+        if self.current_expiration_bucket.as_deref() == Some(bucket_name) {
+            self.current_expiration_bucket = None;
+        }
         let unprovisioned_metadata_tables = held
             .take_metadata_configuration()
             .map(|configuration| self.unprovisioned_metadata_tables(&configuration, now))

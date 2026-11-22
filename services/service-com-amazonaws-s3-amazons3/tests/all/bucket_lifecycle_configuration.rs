@@ -2087,3 +2087,35 @@ fn the_lifecycle_document_schema_tables_match_the_model() {
          members; declared {declared_required:?}, the model reports {derived_required:?}"
     );
 }
+
+#[tokio::test]
+async fn current_expiration_leaves_one_marker_and_preserves_the_source_version() {
+    let (router, engine) = super::bucket_lifecycle::router_with_engine();
+    let name = "expiration-effect";
+    service_com_amazonaws_s3_amazons3::state::service_state(&*engine).unwrap().lock()
+        .set_experimental_current_expiration_bucket(Some(name.into()));
+    bucket(&router, name).await;
+    super::object_versioning::set_versioning(&router, name, "Enabled").await;
+    let written = put_object(&router, name, "tmp/source", b"source bytes", &[]).await;
+    let version = written.header("x-amz-version-id").unwrap();
+    assert_eq!(put_object(&router, name, "keep", b"control", &[]).await.status, 200);
+    let config = "<LifecycleConfiguration><Rule><ID>due</ID><Filter><Prefix>tmp/</Prefix></Filter><Status>Enabled</Status><Expiration><Date>2000-01-01T00:00:00Z</Date></Expiration></Rule></LifecycleConfiguration>";
+    assert_eq!(put_lifecycle(&router, name, &[], config).await.status, 200);
+    let scoped = send(&router, "GET", &format!("/{name}?versions&prefix=tmp/"), &[], "").await;
+    assert_eq!(scoped.status, 200);
+    assert!(!text(&scoped).contains("<DeleteMarker>"));
+    let wrong_owner = send(&router, "GET", &format!("/{name}?versions"),
+        &[("x-amz-expected-bucket-owner", "999999999999")], "").await;
+    assert_eq!(wrong_owner.status, 403);
+    assert_eq!(get_object(&router, name, "tmp/source", "", &[]).await.status, 200);
+    for _ in 0..2 {
+        let listed = send(&router, "GET", &format!("/{name}?versions"), &[], "").await;
+        assert_eq!(listed.status, 200);
+        assert_eq!(text(&listed).matches("<DeleteMarker>").count(), 1);
+        assert_eq!(head_object(&router, name, "tmp/source", "").await.status, 404);
+        let saved = get_object(&router, name, "tmp/source", &format!("?versionId={version}"), &[]).await;
+        assert_eq!(saved.status, 200);
+        assert_eq!(text(&saved), "source bytes");
+        assert_eq!(text(&get_object(&router, name, "keep", "", &[]).await), "control");
+    }
+}

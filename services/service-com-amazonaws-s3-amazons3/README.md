@@ -122,3 +122,22 @@ State lives in the SINGLE shared engine, keyed by type. Reach it through
 Do not add a second engine crate — the router and every service must share
 one `InMemoryEngine` type or the engine the router injects cannot be handed to this
 service's operations.
+
+### Experimental current-object expiration
+
+For a disposable local calibration bucket, set
+`AWS_EMULATOR_EXPERIMENTAL_S3_CURRENT_EXPIRATION_BUCKET` to its exact name
+before starting a fresh engine. By default lifecycle configuration remains
+passive. An authorized, unfiltered ListObjectVersions first-page request with default
+parameters reconciles that bucket under its ordinary API. GET and HEAD stay
+passive. Deleting the selected bucket disarms the mode for later recreations.
+The mode skips buckets with more than 64 distinct stored keys. Reconciliation is demand-driven, under the store lock. No background deadline
+or notification delivery is modeled.
+
+An enabled matching current Expiration with Days or Date removes the current
+unversioned object or adds a single versioned delete marker, subject to store
+limits. Explicit reads of previous version IDs retain their bytes. The
+calibration skips directory, suspended, replicated, notification-configured
+and Object Lock buckets and versions carrying replication, retention or legal
+hold state. Noncurrent expiration, storage transitions, expired marker removal
+and multipart cleanup are outside this mode.

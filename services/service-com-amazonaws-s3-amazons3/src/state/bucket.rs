@@ -2340,7 +2340,12 @@ impl Bucket {
     /// not exist. NOTHING is written when the answer is a ceiling: a delete marker is a
     /// stored version like any other, so it is refused rather than recorded once the bucket
     /// is at [`MAX_OBJECTS_PER_BUCKET`] stored versions.
-    pub(super) fn remove_object(&mut self, key: &str, minted: Option<String>) -> ObjectDeletion {
+    pub(super) fn remove_object(
+        &mut self,
+        key: &str,
+        minted: Option<String>,
+        now: SystemTime,
+    ) -> ObjectDeletion {
         let held_object = self.object(key).is_some();
 
         // A bucket with no versioning state keeps no history: the delete takes the `null`
@@ -2374,7 +2379,7 @@ impl Bucket {
                 0,
                 StoredVersion::DeleteMarker(DeleteMarker {
                     version_id: version_id.clone(),
-                    last_modified: SystemTime::now(),
+                    last_modified: now,
                 }),
             );
         ObjectDeletion::MarkerLaid {

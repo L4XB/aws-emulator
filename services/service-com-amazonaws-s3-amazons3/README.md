@@ -129,7 +129,8 @@ For a disposable local calibration bucket, set
 `AWS_EMULATOR_EXPERIMENTAL_S3_CURRENT_EXPIRATION_BUCKET` to its exact name
 before starting a fresh engine. By default lifecycle configuration remains
 passive. An authorized, unfiltered ListObjectVersions first-page request with default
-parameters reconciles that bucket under its ordinary API. GET and HEAD stay
+pagination reconciles that bucket under its ordinary API. Optional URL encoding
+of returned keys and a matching expected-owner header preserve this scope. GET and HEAD stay
 passive. Deleting the selected bucket disarms the mode for later recreations.
 The mode skips buckets with more than 64 distinct stored keys. Reconciliation is demand-driven, under the store lock. No background deadline
 or notification delivery is modeled.

@@ -365,7 +365,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // calibration bucket advances the experiment. Scoped/paginated reads stay passive.
         if input.prefix.is_none() && input.delimiter.is_none() && input.key_marker.is_none()
             && input.version_id_marker.is_none() && input.max_keys.is_none()
-            && input.encoding_type.is_none()
         {
             store.expire_current_objects(&input.bucket, std::time::SystemTime::now());
         }

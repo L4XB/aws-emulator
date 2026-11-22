@@ -2110,8 +2110,9 @@ async fn current_expiration_leaves_one_marker_and_preserves_the_source_version()
         &[("x-amz-expected-bucket-owner", "999999999999")], "").await;
     assert_eq!(wrong_owner.status, 403);
     assert_eq!(get_object(&router, name, "tmp/source", "", &[]).await.status, 200);
-    for _ in 0..2 {
-        let listed = send(&router, "GET", &format!("/{name}?versions"), &[], "").await;
+    // SDKs may request URL encoding of the returned key names, which leaves scope unchanged.
+    for query in ["versions&encoding-type=url", "versions"] {
+        let listed = send(&router, "GET", &format!("/{name}?{query}"), &[], "").await;
         assert_eq!(listed.status, 200);
         assert_eq!(text(&listed).matches("<DeleteMarker>").count(), 1);
         assert_eq!(head_object(&router, name, "tmp/source", "").await.status, 404);

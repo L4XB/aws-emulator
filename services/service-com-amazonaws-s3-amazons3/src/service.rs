@@ -79,6 +79,7 @@ pub mod chunked_upload;
 // The calls on the CONTENTS of an object, which CloudTrail delivers as DATA events into the
 // bucket of every trail whose event selectors admit them — see `service/data_events.rs`.
 pub mod data_events;
+mod server_access_logs;
 // The calls that ADMINISTER a bucket, which CloudTrail records in the account's event history
 // where `LookupEvents` reports them — see `service/management_events.rs`.
 pub mod management_events;

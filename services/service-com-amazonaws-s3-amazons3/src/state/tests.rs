@@ -1128,24 +1128,22 @@ fn current_lifecycle_expiration_observes_scope_age_and_current_version() {
             store.put_object("one", key, guarded).unwrap();
         }
         store.set_experimental_current_expiration_bucket(None);
-        store.expire_current_objects("one", None, due);
+        store.expire_current_objects("one", due);
         assert!(store.bucket("one").unwrap().object("tmp/old").is_some());
         store.set_experimental_current_expiration_bucket(Some("other".into()));
-        store.expire_current_objects("one", None, due);
+        store.expire_current_objects("one", due);
         assert!(store.bucket("one").unwrap().object("tmp/old").is_some());
         store.set_experimental_current_expiration_bucket(Some("one".into()));
         store.put_notification_configuration("one", BucketNotificationConfiguration {
             event_bridge_enabled: true, ..Default::default()
         }).unwrap();
-        store.expire_current_objects("one", None, due);
+        store.expire_current_objects("one", due);
         assert!(store.bucket("one").unwrap().object("tmp/old").is_some());
         store.put_notification_configuration("one", Default::default()).unwrap();
-        store.expire_current_objects("one", None, due - std::time::Duration::from_nanos(1));
-        assert!(store.bucket("one").unwrap().object("tmp/old").is_some());
-        store.expire_current_objects("one", Some("tmp/replaced"), due);
+        store.expire_current_objects("one", due - std::time::Duration::from_nanos(1));
         assert!(store.bucket("one").unwrap().object("tmp/old").is_some());
         for _ in 0..2 {
-            store.expire_current_objects("one", None, due);
+            store.expire_current_objects("one", due);
             let held = store.bucket("one").unwrap();
             assert!(held.object("tmp/old").is_none());
             assert!(held.object("tmp/replaced").is_some());
@@ -1167,12 +1165,12 @@ fn current_lifecycle_expiration_observes_scope_age_and_current_version() {
         guarded.last_modified = created;
         store.put_object("one", "tmp/mode", guarded).unwrap();
         store.bucket_mut("one").unwrap().set_versioning(VERSIONING_SUSPENDED_STATUS, None);
-        store.expire_current_objects("one", None, due);
+        store.expire_current_objects("one", due);
         assert!(store.bucket("one").unwrap().object("tmp/mode").is_some());
         let held = store.bucket_mut("one").unwrap();
         held.set_versioning(VERSIONING_ENABLED_STATUS, None);
         held.enable_object_lock();
-        store.expire_current_objects("one", None, due);
+        store.expire_current_objects("one", due);
         assert!(store.bucket("one").unwrap().object("tmp/mode").is_some());
         store.remove_bucket("one", due);
         assert!(store.current_expiration_bucket.is_none());

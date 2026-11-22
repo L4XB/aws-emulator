@@ -2097,6 +2097,8 @@ async fn current_expiration_leaves_one_marker_and_preserves_the_source_version()
     bucket(&router, name).await;
     super::object_versioning::set_versioning(&router, name, "Enabled").await;
     let written = put_object(&router, name, "tmp/source", b"source bytes", &[]).await;
+    assert_eq!(written.status, 200);
+    let etag = written.header("etag").unwrap();
     let version = written.header("x-amz-version-id").unwrap();
     assert_eq!(put_object(&router, name, "keep", b"control", &[]).await.status, 200);
     let config = "<LifecycleConfiguration><Rule><ID>due</ID><Filter><Prefix>tmp/</Prefix></Filter><Status>Enabled</Status><Expiration><Date>2000-01-01T00:00:00Z</Date></Expiration></Rule></LifecycleConfiguration>";
@@ -2115,7 +2117,8 @@ async fn current_expiration_leaves_one_marker_and_preserves_the_source_version()
         assert_eq!(head_object(&router, name, "tmp/source", "").await.status, 404);
         let saved = get_object(&router, name, "tmp/source", &format!("?versionId={version}"), &[]).await;
         assert_eq!(saved.status, 200);
-        assert_eq!(text(&saved), "source bytes");
+        assert_eq!(saved.header("etag").as_deref(), Some(etag.as_str()));
+        assert_eq!(saved.body.as_ref(), b"source bytes");
         assert_eq!(text(&get_object(&router, name, "keep", "", &[]).await), "control");
     }
 }

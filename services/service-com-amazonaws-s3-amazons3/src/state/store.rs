@@ -2261,11 +2261,9 @@ impl ComAmazonawsS3Amazons3State {
     }
 
     /// Advance the experimental small-bucket inventory under the caller's store lock.
-    /// An exact key selection is supported for isolated store-level calibration.
     pub(crate) fn expire_current_objects(
         &mut self,
         bucket: &str,
-        key: Option<&str>,
         now: SystemTime,
     ) {
         if self.current_expiration_bucket.as_deref() != Some(bucket) {
@@ -2295,12 +2293,6 @@ impl ComAmazonawsS3Amazons3State {
                         .is_some_and(|expiration| expiration.expires_at <= now)
             })
         };
-        if let Some(key) = key {
-            if due(key) {
-                self.remove_object_at(bucket, key, now);
-            }
-            return;
-        }
         let keys: Vec<String> = held.versions.keys().filter(|key| due(key)).cloned().collect();
         for key in keys {
             if matches!(self.remove_object_at(bucket, &key, now),

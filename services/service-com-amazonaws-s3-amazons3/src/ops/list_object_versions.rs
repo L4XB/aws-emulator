@@ -367,7 +367,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             && input.version_id_marker.is_none() && input.max_keys.is_none()
             && input.encoding_type.is_none()
         {
-            store.expire_current_objects(&input.bucket, None, std::time::SystemTime::now());
+            store.expire_current_objects(&input.bucket, std::time::SystemTime::now());
         }
         let bucket = store.bucket(&input.bucket)
             .ok_or(ListObjectVersionsErrorModeled::NoSuchBucket(NoSuchBucket {}))?;

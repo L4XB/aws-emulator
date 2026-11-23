@@ -1457,3 +1457,65 @@ async fn document_lifecycle_is_scoped_to_the_selected_index() {
         assert_eq!(call(&router, op, input).await.0, 404);
     }
 }
+
+#[tokio::test]
+async fn web_crawler_configuration_is_owned_by_one_parent_index() {
+    let router = kendra();
+    let left = create_index(&router, "first").await;
+    let right = create_index(&router, "second").await;
+    wait_until_active(&router, &left).await;
+    wait_until_active(&router, &right).await;
+    let configuration = |seed: &str| {
+        json!({"WebCrawlerConfiguration":{
+        "Urls":{"SeedUrlConfiguration":{"SeedUrls":[seed]}},
+        "UrlInclusionPatterns":["include"], "UrlExclusionPatterns":["exclude"],
+        "ProxyConfiguration":{"Host":"proxy.invalid","Port":8123}}})
+    };
+    let initial = configuration("https://a.invalid");
+    let request = json!({"IndexId":left,"Type":"WEBCRAWLER","Name":"Example","ClientToken":"retry",
+                         "RoleArn":ROLE_ARN,"Configuration":initial});
+    let (http, created) = call(&router, "CreateDataSource", request.clone()).await;
+    assert_eq!(http, 200, "{created}");
+    assert_eq!(
+        call(&router, "CreateDataSource", request).await,
+        (200, created.clone())
+    );
+    let id = &created["Id"];
+    let key = json!({"IndexId":left,"Id":id});
+    let wrong_key = json!({"IndexId":right,"Id":id});
+    for op in ["DescribeDataSource", "DeleteDataSource", "UpdateDataSource"] {
+        assert_eq!(call(&router, op, wrong_key.clone()).await.0, 404);
+    }
+    assert_eq!(
+        call(&router, "ListDataSources", json!({"IndexId":right}))
+            .await
+            .1["SummaryItems"],
+        json!([])
+    );
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    let (_, row) = call(&router, "DescribeDataSource", key.clone()).await;
+    assert_eq!(row["Status"], "ACTIVE");
+    assert_eq!(row["Configuration"], initial);
+    let changed = configuration("https://b.invalid");
+    assert_eq!(
+        call(
+            &router,
+            "UpdateDataSource",
+            json!({"IndexId":left,"Id":id,"Configuration":changed})
+        )
+        .await
+        .0,
+        200
+    );
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    let (_, row) = call(&router, "DescribeDataSource", key.clone()).await;
+    assert_eq!(row["Configuration"], changed);
+    assert_eq!(row["Name"], "Example");
+    assert_eq!(call(&router, "DeleteDataSource", key.clone()).await.0, 200);
+    assert_eq!(
+        call(&router, "DescribeDataSource", key.clone()).await.1["Status"],
+        "DELETING"
+    );
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    assert_eq!(call(&router, "DescribeDataSource", key).await.0, 404);
+}

@@ -130,6 +130,50 @@ pub fn document_quota(edition: &str) -> usize {
     }
 }
 
+/// Configuration of one native connector; sync jobs are a separate operation.
+#[derive(Debug, Clone)]
+pub struct StoredDataSource {
+    pub row: crate::ops::types::DescribeDataSourceOutput,
+    pub client_token: Option<String>,
+    pub transition_at: Option<SystemTime>,
+}
+
+/// Validate the two mutually exclusive URL source forms accepted by a web crawler.
+pub fn validate_web_source(
+    cfg: &crate::ops::types::DataSourceConfiguration,
+) -> Result<(), &'static str> {
+    let crawler = cfg
+        .web_crawler_configuration
+        .as_ref()
+        .ok_or("WebCrawlerConfiguration is required")?;
+    if crawler.urls.site_maps_configuration.is_some()
+        == crawler.urls.seed_url_configuration.is_some()
+    {
+        return Err("provide exactly one web crawler URL source");
+    }
+    if cfg.s3_configuration.is_some()
+        || cfg.share_point_configuration.is_some()
+        || cfg.database_configuration.is_some()
+        || cfg.salesforce_configuration.is_some()
+        || cfg.one_drive_configuration.is_some()
+        || cfg.service_now_configuration.is_some()
+        || cfg.confluence_configuration.is_some()
+        || cfg.google_drive_configuration.is_some()
+        || cfg.work_docs_configuration.is_some()
+        || cfg.fsx_configuration.is_some()
+        || cfg.slack_configuration.is_some()
+        || cfg.box_configuration.is_some()
+        || cfg.quip_configuration.is_some()
+        || cfg.jira_configuration.is_some()
+        || cfg.git_hub_configuration.is_some()
+        || cfg.alfresco_configuration.is_some()
+        || cfg.template_configuration.is_some()
+    {
+        return Err("WEBCRAWLER requires only WebCrawlerConfiguration");
+    }
+    Ok(())
+}
+
 /// A document stored in an index by `BatchPutDocument`, keyed by `Document.Id`.
 #[derive(Debug, Clone)]
 pub struct StoredDocument {
@@ -163,6 +207,7 @@ impl StoredDocument {
 /// One Kendra index, as `CreateIndex` minted it.
 #[derive(Debug, Clone)]
 pub struct Index {
+    pub data_sources: std::collections::BTreeMap<String, StoredDataSource>,
     /// `IndexId`: 36 characters, `^[a-zA-Z0-9][a-zA-Z0-9-]*$`.
     pub id: String,
     pub name: String,
@@ -378,6 +423,17 @@ impl ComAmazonawsKendraAwskendrafrontendserviceState {
     /// run it: it materialises the clock's work, never the caller's.
     pub fn materialize_due_transitions(&mut self, now: SystemTime) {
         for index in self.indices.values_mut() {
+            index.data_sources.retain(|_, source| {
+                if let Some(at) = source.transition_at.filter(|at| *at <= now) {
+                    if source.row.status.as_deref() == Some("DELETING") {
+                        return false;
+                    }
+                    source.row.status = Some("ACTIVE".into());
+                    source.row.updated_at = Some(at.into());
+                    source.transition_at = None;
+                }
+                true
+            });
             if let Some(active_at) = index.active_at {
                 if active_at <= now {
                     index.status = STATUS_ACTIVE.to_string();

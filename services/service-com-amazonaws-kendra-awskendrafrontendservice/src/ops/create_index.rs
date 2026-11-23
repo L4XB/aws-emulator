@@ -322,6 +322,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             user_token_configurations: input.user_token_configurations.clone(),
             user_group_resolution_configuration: input.user_group_resolution_configuration.clone(),
             client_token: input.client_token.clone(),
+            data_sources: Default::default(),
             documents: ::std::collections::HashMap::new(),
             faq_count: 0,
             active_at: Some(now + crate::state::INDEX_ACTIVATION_DELAY),

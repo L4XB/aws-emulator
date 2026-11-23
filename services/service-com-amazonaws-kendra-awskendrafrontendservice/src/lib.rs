@@ -11,6 +11,7 @@ pub mod ops;
 pub mod scaffolded;
 pub mod service;
 pub mod state;
+pub mod single_page;
 
 pub use state::ComAmazonawsKendraAwskendrafrontendserviceState;
 

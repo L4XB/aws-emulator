@@ -133,6 +133,8 @@ pub fn document_quota(edition: &str) -> usize {
 /// Configuration of one native connector; sync jobs are a separate operation.
 #[derive(Debug, Clone)]
 pub struct StoredDataSource {
+    pub(crate) page: Option<crate::single_page::Page>,
+    pub(crate) job: Option<crate::ops::types::DataSourceSyncJob>,
     pub row: crate::ops::types::DescribeDataSourceOutput,
     pub client_token: Option<String>,
     pub transition_at: Option<SystemTime>,

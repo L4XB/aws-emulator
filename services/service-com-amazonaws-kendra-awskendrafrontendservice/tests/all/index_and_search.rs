@@ -1519,3 +1519,20 @@ async fn web_crawler_configuration_is_owned_by_one_parent_index() {
     tokio::time::sleep(Duration::from_millis(550)).await;
     assert_eq!(call(&router, "DescribeDataSource", key).await.0, 404);
 }
+
+#[tokio::test]
+async fn ordinary_sources_cannot_acquire_a_sync_transport() {
+    let router = kendra();
+    let index = create_index(&router, "closed").await;
+    wait_until_active(&router, &index).await;
+    let (status, source) = call(&router, "CreateDataSource", json!({
+        "IndexId":index,"Name":"Unmounted","Type":"WEBCRAWLER","RoleArn":ROLE_ARN,
+        "Configuration":{"WebCrawlerConfiguration":{"Urls":{"SeedUrlConfiguration":{
+            "SeedUrls":["http://fixture.invalid/"],"WebCrawlerMode":"HOST_ONLY"}},"CrawlDepth":0}}
+    })).await;
+    assert_eq!(status,200);
+    let key=json!({"IndexId":index,"Id":source["Id"]});
+    for operation in ["ListDataSourceSyncJobs","StartDataSourceSyncJob","StopDataSourceSyncJob"] {
+        assert_eq!(call(&router,operation,key.clone()).await.0,501);
+    }
+}

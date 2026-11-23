@@ -265,6 +265,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         index.data_sources.insert(
             id.clone(),
             crate::state::StoredDataSource {
+                page: None,
+                job: None,
                 row,
                 client_token: input.client_token,
                 transition_at: Some(now + crate::state::INDEX_ACTIVATION_DELAY),

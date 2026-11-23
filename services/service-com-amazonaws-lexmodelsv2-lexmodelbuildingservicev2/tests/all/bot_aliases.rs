@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! End-to-end HTTP tests for `ListBotAliases`.
+//! End-to-end HTTP tests for reading stored bot aliases.
 //!
 //! Every request goes through the same `MultiServiceRouter::dispatch` the emulator
 //! serves on its socket, so the restJson1 routing, the modelled constraints and the
@@ -351,4 +351,87 @@ async fn a_listing_request_outside_what_the_model_accepts_is_refused() {
             "maxResults {page_size} is a published bound and must be accepted, got {status} {response:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn describe_bot_alias_reads_the_created_record_without_inventing_locale_settings() {
+    let router = emulator();
+    for (name, locale) in [("AliasEnglishBot", "en_US"), ("AliasGermanBot", "de_DE")] {
+        let bot = crate::slot_type::host_locale(&router, name, locale).await;
+        let (_, listed) = list(&router, &bot, json!({})).await;
+        let summary = &summaries(&listed)[0];
+        let uri = format!("{}/{}", aliases_uri(&bot), state::TEST_BOT_ALIAS_ID);
+        let (status, detail) = call(&router, "GET", &uri, None).await;
+        assert_eq!(status, 200, "{detail:?}");
+        assert_eq!(text(&detail, "botId"), bot);
+        assert_test_alias(name, &detail);
+        for (key, value) in summary.as_object().unwrap() {
+            assert_eq!(detail.get(key), Some(value));
+        }
+        assert!(detail.get("botAliasLocaleSettings").is_none());
+        let (_, again) = call(&router, "GET", &uri, None).await;
+        assert_eq!(detail, again);
+    }
+}
+
+#[tokio::test]
+async fn describe_bot_alias_rejects_absent_and_deleted_bindings() {
+    let router = emulator();
+    let bot = create_bot(&router, &create_body("AliasRemovedBot", 300, json!({}))).await;
+    for (bot_id, alias_id) in [
+        ("ZZZZZZZZZZ", state::TEST_BOT_ALIAS_ID),
+        (bot.as_str(), "UNKNOWN001"),
+    ] {
+        let uri = format!("{}/{alias_id}", aliases_uri(bot_id));
+        let (status, response) = call(&router, "GET", &uri, None).await;
+        assert_eq!(status, 404, "{response:?}");
+        assert_eq!(error_code(&response), "ResourceNotFoundException");
+    }
+    let (status, _) = call(&router, "DELETE", &format!("/bots/{bot}"), None).await;
+    assert_eq!(status, 202);
+    let uri = format!("{}/{}", aliases_uri(&bot), state::TEST_BOT_ALIAS_ID);
+    let (status, response) = call(&router, "GET", &uri, None).await;
+    assert_eq!(status, 404, "{response:?}");
+    assert_eq!(error_code(&response), "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn describe_bot_alias_uses_both_keys_and_the_stored_values() {
+    let (router, engine) = crate::bot_lifecycle::emulator_with_engine();
+    let owner = create_bot(&router, &create_body("CustomOwner", 300, json!({}))).await;
+    let other = create_bot(&router, &create_body("OtherOwner", 300, json!({}))).await;
+    // CreateBotAlias is scaffolded. Seed a distinct record to exercise the reader
+    // without implying public support for alias creation or configuration.
+    let alias_id = "ALIAS00001";
+    let store = state::service_state(&*engine).unwrap();
+    {
+        let mut records = store.lock();
+        let source_key = state::bot_alias_key(&owner, state::TEST_BOT_ALIAS_ID);
+        let mut custom = records.bot_aliases[&source_key].clone();
+        custom.bot_alias_id = alias_id.to_string();
+        custom.bot_alias_name = "Preview".to_string();
+        custom.bot_version = "7".to_string();
+        custom.bot_alias_status = "Creating".to_string();
+        custom.description = Some("preview fixture".to_string());
+        records
+            .bot_aliases
+            .insert(state::bot_alias_key(&owner, alias_id), custom);
+    }
+    let uri = format!("{}/{alias_id}", aliases_uri(&owner));
+    let (status, detail) = call(&router, "GET", &uri, None).await;
+    assert_eq!(status, 200, "{detail:?}");
+    for (key, expected) in [
+        ("botId", owner.as_str()),
+        ("botAliasId", alias_id),
+        ("botAliasName", "Preview"),
+        ("botVersion", "7"),
+        ("botAliasStatus", "Creating"),
+        ("description", "preview fixture"),
+    ] {
+        assert_eq!(text(&detail, key), expected);
+    }
+    let wrong_uri = format!("{}/{alias_id}", aliases_uri(&other));
+    let (status, error) = call(&router, "GET", &wrong_uri, None).await;
+    assert_eq!(status, 404, "{error:?}");
+    assert_eq!(error_code(&error), "ResourceNotFoundException");
 }

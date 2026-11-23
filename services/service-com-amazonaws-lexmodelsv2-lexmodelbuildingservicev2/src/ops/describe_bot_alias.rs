@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeBotAlias
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeBotAlias`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeBotAlias::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reads the alias stored under the requested bot and alias IDs. CreateBot installs
+//! the implicit test alias in the same store used by ListBotAliases.
 //!
 //! ## Shape of an operation
 //!
@@ -175,18 +168,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeBotAlias` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeBotAliasErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeBotAlias"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DescribeBotAliasErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the Lex Models V2 store is unavailable".to_string()),
+            })
+        })?;
+        let store = state.lock();
+        let key = crate::state::bot_alias_key(&input.bot_id, &input.bot_alias_id);
+        let alias = store.bot_aliases.get(&key).ok_or_else(|| {
+            DescribeBotAliasErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+                message: Some(crate::state::RESOURCE_NOT_FOUND_MESSAGE.to_string()),
+            })
+        })?;
+        Ok(DescribeBotAliasOutput {
+            bot_alias_id: Some(alias.bot_alias_id.clone()),
+            bot_alias_name: Some(alias.bot_alias_name.clone()),
+            bot_id: Some(alias.bot_id.clone()),
+            bot_version: Some(alias.bot_version.clone()),
+            bot_alias_status: Some(alias.bot_alias_status.clone()),
+            description: alias.description.clone(),
+            creation_date_time: Some(crate::state::to_date_time(alias.creation_date_time)),
+            last_updated_date_time: Some(crate::state::to_date_time(alias.last_updated_date_time)),
+            // These optional members have no producer in the current alias store.
+            // A bot locale is not evidence of alias-specific enablement or hooks.
+            bot_alias_locale_settings: None,
+            conversation_log_settings: None,
+            sentiment_analysis_settings: None,
+            bot_alias_history_events: None,
+            parent_bot_networks: None,
+        })
     }
 }

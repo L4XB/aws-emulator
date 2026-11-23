@@ -108,6 +108,24 @@ pub const MAX_ARCHIVES_PER_VAULT: usize = 1000;
 /// See [`MAX_ARCHIVES_PER_VAULT`].
 pub const MAX_VAULT_BYTES: i64 = 64 * 1024 * 1024;
 
+/// Vault tagging restrictions from the S3 Glacier Developer Guide:
+/// <https://docs.aws.amazon.com/amazonglacier/latest/dev/tagging.html>.
+pub const MAX_TAGS_PER_VAULT: usize = 50;
+
+fn valid_tag_char(c: char) -> bool {
+    c.is_alphanumeric() || " _./=+-@".contains(c)
+}
+
+/// Test a user-supplied tag key before changing any tags.
+pub fn valid_tag_key(key: &str) -> bool {
+    (1..=128).contains(&key.chars().count()) && key.chars().all(valid_tag_char)
+}
+
+/// Glacier allows empty values and counts Unicode characters.
+pub fn valid_tag_value(value: &str) -> bool {
+    value.chars().count() <= 255 && value.chars().all(valid_tag_char)
+}
+
 /// One stored archive. `body` is the bytes `UploadArchive` received, byte for byte, held
 /// as a [`Bytes`] so a retrieval job can take a view of it without copying the content.
 #[derive(Debug, Clone)]

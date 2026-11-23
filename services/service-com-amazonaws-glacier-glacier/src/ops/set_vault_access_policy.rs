@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op SetVaultAccessPolicy
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `SetVaultAccessPolicy`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`SetVaultAccessPolicy::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
-//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -179,18 +169,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `SetVaultAccessPolicy` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(SetVaultAccessPolicyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("SetVaultAccessPolicy"))
+        use crate::state;
+        use SetVaultAccessPolicyErrorModeled as Error;
+        let store = state::service_state(&*self.engine).ok_or_else(|| {
+            Error::ServiceUnavailableException(state::service_unavailable(state::NO_STORE_MESSAGE))
+        })?;
+        let region = state::request_region(ctx);
+        let account = state::resolve_account(&input.account_id)
+            .map_err(Error::InvalidParameterValueException)?;
+        let mut state = store.lock();
+        let vault = state
+            .vaults
+            .get_mut(&(account, input.vault_name.clone()))
+            .filter(|vault| vault.vault_arn == state::vault_arn(&region, &input.vault_name))
+            .ok_or_else(|| {
+                Error::ResourceNotFoundException(state::vault_not_found(&region, &input.vault_name))
+            })?;
+        let policy = input.policy.and_then(|value| value.policy).ok_or_else(|| {
+            Error::MissingParameterValueException(state::missing_parameter_value(
+                "Policy is required",
+            ))
+        })?;
+        if policy.len() > 20 * 1024
+            || !serde_json::from_str::<serde_json::Value>(&policy).is_ok_and(|doc| doc.is_object())
+        {
+            return Err(
+                Error::InvalidParameterValueException(state::invalid_parameter_value(
+                    "Policy must be a JSON object of at most 20 KiB",
+                ))
+                .into(),
+            );
+        }
+        vault.access_policy = Some(policy);
+        Ok(SetVaultAccessPolicyOutput)
     }
 }

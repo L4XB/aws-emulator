@@ -1962,3 +1962,126 @@ async fn a_resource_that_is_not_stored_is_refused_with_the_modelled_error() {
         );
     }
 }
+
+#[tokio::test]
+async fn vault_tags_merge_atomically_and_remove_idempotently() {
+    let emu = Emulator::new();
+    let vault = "/-/vaults/tagged";
+    assert_eq!(status(&emu.create_vault("-", "tagged").await), 201);
+    let list = format!("{vault}/tags");
+    let add = format!("{list}?operation=add");
+    let remove = format!("{list}?operation=remove");
+    let headers = &[("content-type", "application/json")];
+    assert_eq!(
+        json(&emu.send("GET", &list, &[], &[]).await)["Tags"],
+        serde_json::json!({})
+    );
+    let tags: serde_json::Map<String, Value> = (0..50)
+        .map(|i| (format!("key{i}"), Value::from("")))
+        .collect();
+    let full = serde_json::to_vec(&serde_json::json!({"Tags":tags})).unwrap();
+    assert_eq!(status(&emu.send("POST", &add, headers, &full).await), 204);
+    assert_eq!(
+        status(
+            &emu.send("POST", &add, headers, br#"{"Tags":{"key0":"updated"}}"#)
+                .await
+        ),
+        204
+    );
+    let too_many = emu
+        .send(
+            "POST",
+            &add,
+            headers,
+            br#"{"Tags":{"key0":"lost","new":"extra"}}"#,
+        )
+        .await;
+    expect_error("quota", &too_many, 400, "LimitExceededException");
+    let bad = emu
+        .send(
+            "POST",
+            &remove,
+            headers,
+            br#"{"TagKeys":["key0","aws:reserved"]}"#,
+        )
+        .await;
+    expect_error("invalid tag", &bad, 400, "InvalidParameterValueException");
+    assert_eq!(
+        json(&emu.send("GET", &list, &[], &[]).await)["Tags"]["key0"],
+        "updated"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            status(
+                &emu.send(
+                    "POST",
+                    &remove,
+                    headers,
+                    br#"{"TagKeys":["key0","absent"]}"#
+                )
+                .await
+            ),
+            204
+        );
+    }
+    assert_eq!(
+        json(&emu.send("GET", &list, &[], &[]).await)["Tags"]
+            .as_object()
+            .unwrap()
+            .len(),
+        49
+    );
+    expect_error(
+        "missing vault",
+        &emu.send("GET", "/-/vaults/missing/tags", &[], &[]).await,
+        404,
+        "ResourceNotFoundException",
+    );
+}
+
+#[tokio::test]
+async fn vault_policy_roundtrip_reflects_changes_and_deletion() {
+    let emu = Emulator::new();
+    assert_eq!(status(&emu.create_vault("-", "policy").await), 201);
+    let path = "/-/vaults/policy/access-policy";
+    let headers = &[("content-type", "application/json")];
+    expect_error(
+        "no policy",
+        &emu.send("GET", path, &[], &[]).await,
+        404,
+        "ResourceNotFoundException",
+    );
+    let mut last_policy = String::new();
+    for action in ["glacier:ListTagsForVault", "glacier:DescribeVault"] {
+        let policy = serde_json::json!({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":action,"Resource":"*"}]}).to_string();
+        let payload = serde_json::to_vec(&serde_json::json!({"Policy":policy})).unwrap();
+        assert_eq!(status(&emu.send("PUT", path, headers, &payload).await), 204);
+        assert_eq!(
+            json(&emu.send("GET", path, &[], &[]).await)["Policy"],
+            policy
+        );
+        last_policy = policy;
+    }
+    let bad = emu
+        .send("PUT", path, headers, br#"{"Policy":"not json"}"#)
+        .await;
+    expect_error(
+        "malformed document",
+        &bad,
+        400,
+        "InvalidParameterValueException",
+    );
+    assert_eq!(
+        json(&emu.send("GET", path, &[], &[]).await)["Policy"],
+        last_policy
+    );
+    for _ in 0..2 {
+        assert_eq!(status(&emu.send("DELETE", path, &[], &[]).await), 204);
+    }
+    expect_error(
+        "deleted",
+        &emu.send("GET", path, &[], &[]).await,
+        404,
+        "ResourceNotFoundException",
+    );
+}

@@ -80,14 +80,26 @@ impl Emulator {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> Response<Bytes> {
+        self.send_in_region(REGION, method, path, headers, body)
+            .await
+    }
+
+    async fn send_in_region(
+        &self,
+        region: &str,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Response<Bytes> {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
-            .header("host", format!("glacier.{REGION}.amazonaws.com"))
+            .header("host", format!("glacier.{region}.amazonaws.com"))
             .header(
                 "authorization",
                 format!(
-                    "AWS4-HMAC-SHA256 Credential=AKIDGLACIERTEST/20261021/{REGION}/glacier/aws4_request, \
+                    "AWS4-HMAC-SHA256 Credential=AKIDGLACIERTEST/20261021/{region}/glacier/aws4_request, \
                      SignedHeaders=host, Signature=0000"
                 ),
             );
@@ -1961,4 +1973,93 @@ async fn a_resource_that_is_not_stored_is_refused_with_the_modelled_error() {
             "InvalidParameterValueException",
         );
     }
+}
+
+#[tokio::test]
+async fn vault_notification_configuration_isolated_replaced_and_removed() {
+    let emulator = Emulator::new();
+    for vault in ["first", "second"] {
+        assert_eq!(status(&emulator.create_vault("-", vault).await), 201);
+    }
+    let path = "/-/vaults/first/notification-configuration";
+    let other = "/-/vaults/second/notification-configuration";
+    let absent = "/-/vaults/absent/notification-configuration";
+    let explicit = path.replacen("/-/", &format!("/{}/", account_id()), 1);
+    let foreign = path.replacen("/-/", "/111222333444/", 1);
+    let config = |name: &str, events: &[&str]| {
+        serde_json::json!({
+            "SNSTopic": format!("arn:aws:sns:{REGION}:{}:{name}", account_id()), "Events": events
+        })
+    };
+    let initial = config(
+        "initial",
+        &["ArchiveRetrievalCompleted", "InventoryRetrievalCompleted"],
+    );
+    let replacement = config("replacement", &["InventoryRetrievalCompleted"]);
+    let initial_bytes = serde_json::to_vec(&initial).unwrap();
+    assert_eq!(status(&emulator.send("GET", path, &[], &[]).await), 404);
+    for endpoint in [path, other] {
+        assert_eq!(
+            status(&emulator.send("PUT", endpoint, &[], &initial_bytes).await),
+            204
+        );
+        assert_eq!(
+            json(&emulator.send("GET", endpoint, &[], &[]).await),
+            initial
+        );
+    }
+    assert_eq!(
+        status(
+            &emulator
+                .send(
+                    "PUT",
+                    &explicit,
+                    &[],
+                    &serde_json::to_vec(&replacement).unwrap()
+                )
+                .await
+        ),
+        204
+    );
+    for body in [
+        serde_json::json!({}),
+        config("initial", &[]),
+        config("initial", &["other"]),
+        serde_json::json!({"Events":["ArchiveRetrievalCompleted"]}),
+    ] {
+        assert_eq!(
+            status(
+                &emulator
+                    .send("PUT", path, &[], &serde_json::to_vec(&body).unwrap())
+                    .await
+            ),
+            400
+        );
+    }
+    for (method, body) in [
+        ("GET", &[][..]),
+        ("PUT", initial_bytes.as_slice()),
+        ("DELETE", &[][..]),
+    ] {
+        assert_eq!(status(&emulator.send(method, absent, &[], body).await), 404);
+        assert_eq!(
+            status(&emulator.send(method, &foreign, &[], body).await),
+            400
+        );
+        assert_eq!(
+            status(
+                &emulator
+                    .send_in_region("us-east-1", method, path, &[], body)
+                    .await
+            ),
+            404
+        );
+    }
+    assert_eq!(
+        json(&emulator.send("GET", path, &[], &[]).await),
+        replacement
+    );
+    assert_eq!(status(&emulator.send("DELETE", path, &[], &[]).await), 204);
+    assert_eq!(status(&emulator.send("GET", path, &[], &[]).await), 404);
+    assert_eq!(json(&emulator.send("GET", other, &[], &[]).await), initial);
 }

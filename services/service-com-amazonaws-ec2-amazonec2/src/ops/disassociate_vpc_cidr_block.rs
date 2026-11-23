@@ -236,7 +236,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     } else {
                         &route.destination_cidr_block
                     };
-                    !(route.origin.as_deref() == Some("CreateRouteTable")
+                    !(route.origin.as_deref() == Some(state::ROUTE_ORIGIN_CREATE_ROUTE_TABLE)
                         && destination.as_ref() == Some(&cidr))
                 });
             }

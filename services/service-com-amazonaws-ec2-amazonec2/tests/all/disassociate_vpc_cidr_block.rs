@@ -97,6 +97,29 @@ async fn secondary_ipv4_can_be_reused_after_release() {
     let acquired = ok(&router, "AssociateVpcCidrBlock", &acquire).await;
     let id = element(&acquired, "associationId").unwrap();
     let release = [param("AssociationId", &id)];
+    let table = ok(&router, "CreateRouteTable", &[param("VpcId", &vpc_id)]).await;
+    assert!(table.contains("10.11.0.0/16"));
+    let filter = [param(
+        "RouteTableId.1",
+        &element(&table, "routeTableId").unwrap(),
+    )];
+    let subnet = ok(
+        &router,
+        "CreateSubnet",
+        &[param("VpcId", &vpc_id), param("CidrBlock", "10.11.2.0/24")],
+    )
+    .await;
+    let (status, body) = call(&router, REGION, "DisassociateVpcCidrBlock", &release).await;
+    assert_eq!(
+        (status, error_code(&body)),
+        (400, "DependencyViolation".into())
+    );
+    ok(
+        &router,
+        "DeleteSubnet",
+        &[param("SubnetId", &element(&subnet, "subnetId").unwrap())],
+    )
+    .await;
     let body = ok(&router, "DisassociateVpcCidrBlock", &release).await;
     assert_eq!(element(&body, "cidrBlock").as_deref(), Some("10.11.0.0/16"));
     assert_eq!(element(&body, "state").as_deref(), Some("disassociating"));
@@ -109,6 +132,9 @@ async fn secondary_ipv4_can_be_reused_after_release() {
         (status, error_code(&body)),
         (400, "InvalidVpcCidrBlockAssociationID.NotFound".into())
     );
+    let routes = ok(&router, "DescribeRouteTables", &filter).await;
+    assert!(routes.contains("10.10.0.0/16"));
+    assert!(!routes.contains("10.11.0.0/16"));
     let next = ok(&router, "AssociateVpcCidrBlock", &acquire).await;
     assert_ne!(
         element(&next, "associationId").as_deref(),

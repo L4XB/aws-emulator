@@ -483,10 +483,89 @@ fn serve_collection(
     if let Some(refused) = authorization::refusal(&store, &collection_name, caller, request) {
         return refused;
     }
+    if request.segments().as_slice() == ["_cat", "indices"] {
+        if request.method != "GET" {
+            return wrong_method(request, "GET");
+        }
+        return cat_indices(collection, request, |name| {
+            authorization::can_describe_index(&store, &collection_name, caller, name)
+        });
+    }
     let Some(collection) = store.collections.get_mut(collection_id) else {
         return unavailable();
     };
     serve_resolved(collection, request)
+}
+
+/// List the collection's visible indexes in name order. OpenSearch Serverless omits
+/// the cluster health and status columns (AWS, "Supported operations and plugins").
+fn cat_indices(
+    collection: &CollectionRecord,
+    request: &Request<'_>,
+    visible: impl Fn(&str) -> bool,
+) -> RtResponse {
+    if request.query.split('&').filter(|p| !p.is_empty()).any(|p| {
+        !matches!(p.split_once('='), Some(("format" | "h", _)))
+    }) {
+        return error(400, "illegal_argument_exception", "Unsupported CAT parameter");
+    }
+    let json_format = match request.parameter("format") {
+        Some("json") => true,
+        None | Some("txt") => false,
+        Some(_) => return error(400, "illegal_argument_exception", "Unsupported CAT format"),
+    };
+    let columns: Vec<_> = request
+        .parameter("h")
+        .unwrap_or("index,uuid,docs.count")
+        .split(',')
+        .collect();
+    if !columns
+        .iter()
+        .all(|c| matches!(*c, "index" | "uuid" | "docs.count"))
+    {
+        return error(400, "illegal_argument_exception", "Unsupported CAT column");
+    }
+    let mut rows = Vec::new();
+    let mut text = String::new();
+    for (name, index) in &collection.indexes {
+        if !visible(name) {
+            continue;
+        }
+        let mut fields = Vec::new();
+        for column in &columns {
+            fields.push(match *column {
+                "index" => name.clone(),
+                "uuid" => index_uuid(collection, name),
+                _ => index.documents.len().to_string(),
+            });
+        }
+        if json_format {
+            rows.push(Value::Object(
+                columns
+                    .iter()
+                    .zip(fields)
+                    .map(|(k, v)| ((*k).to_string(), Value::String(v)))
+                    .collect(),
+            ));
+        } else {
+            text.push_str(&fields.join(" "));
+            text.push('\n');
+        }
+    }
+    if json_format {
+        return ok(&Value::Array(rows));
+    }
+    let mut response = RtResponse::new(
+        StatusCode::try_from(200).unwrap_or_else(|_| fallback_status()),
+        SdkBody::from(text),
+    );
+    if let Err(refused) = response
+        .headers_mut()
+        .try_insert("content-type", "text/plain; charset=UTF-8")
+    {
+        ::tracing::warn!(error = %refused, "could not set CAT text content type");
+    }
+    response
 }
 
 /// One answer of this surface as a plain HTTP response, which is what a core HTTP listener
@@ -515,7 +594,7 @@ fn as_http(response: RtResponse) -> ::http::Response<Vec<u8>> {
 ///
 /// A path segment where an INDEX belongs is held to what an `IndexName` may be — it cannot
 /// begin with `_` ([`state::validate_index_name`]) — so a reserved endpoint this surface
-/// does not serve (`/_nodes`, `/_cat/indices`) is answered as a path the engine has no
+/// does not serve (`/_nodes`) is answered as a path the engine has no
 /// handler for rather than read as an index of that name. The two names the engine reads as
 /// every index ([`search::EVERY_INDEX`]) are the exception, and only where a read is over
 /// indexes.

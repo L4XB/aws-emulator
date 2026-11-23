@@ -313,6 +313,22 @@ pub(super) fn refusal(
     Some(forbidden())
 }
 
+/// The collection-wide grant check establishes that some index pattern is visible.
+/// Check the concrete resource again before including any index metadata.
+pub(super) fn can_describe_index(
+    store: &ServiceState,
+    collection: &str,
+    caller: &Caller,
+    index: &str,
+) -> bool {
+    caller.unbounded
+        || store.data_access_grants(
+            &caller.principals,
+            &data_access::index_resource(collection, index),
+            data_access::permission::DESCRIBE_INDEX,
+        )
+}
+
 /// The resource `request` addresses and the permission it takes, or `None` for a route this
 /// surface serves nothing for.
 ///
@@ -340,6 +356,10 @@ fn needed(request: &super::Request<'_>) -> Option<(Addressed, &'static str)> {
         [] => Some((
             Addressed::Collection,
             data_access::permission::DESCRIBE_COLLECTION_ITEMS,
+        )),
+        ["_cat", "indices"] => Some((
+            Addressed::EveryIndex,
+            data_access::permission::DESCRIBE_INDEX,
         )),
         ["_bulk"] => Some((
             Addressed::EveryIndex,

@@ -1144,3 +1144,113 @@ async fn a_presigned_request_is_bounded_by_the_same_credential_scope_rule() {
         }
     }
 }
+
+/// A collection's CAT rows must obey the same concrete-index permissions as GET <index>.
+#[tokio::test]
+async fn cat_indices_lists_only_the_bound_collections_visible_indexes() {
+    let router = emulator();
+    create_security_policy(
+        &router,
+        "network",
+        "cat-net",
+        &network_policy(&["collection/*"]),
+    )
+    .await;
+    let first = active_collection(&router, "cat-first").await;
+    let first_host = endpoint_host(&first);
+    let second = active_collection(&router, "cat-second").await;
+    let second_host = endpoint_host(&second);
+    let query = "/_cat/indices?format=json&h=index,docs.count";
+    let (status, rows) = rest(
+        &router,
+        &first_host,
+        AMBIENT_ACCESS_KEY_ID,
+        "GET",
+        query,
+        None,
+    )
+    .await;
+    assert_eq!((status, rows), (200, json!([])));
+    for (host, name) in [
+        (&first_host, "visible"),
+        (&first_host, "private"),
+        (&second_host, "foreign"),
+    ] {
+        let (status, _) = rest(
+            &router,
+            host,
+            AMBIENT_ACCESS_KEY_ID,
+            "PUT",
+            &format!("/{name}"),
+            Some(&knn_index_body(4)),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let (status, media, body) = rest_parts(
+        &router, &first_host, AMBIENT_ACCESS_KEY_ID, "GET", "/_cat/indices?h=index", None
+    ).await;
+    assert_eq!(status, 200);
+    assert!(media.as_deref().is_some_and(|t| t.starts_with("text/plain")));
+    assert_eq!(body, b"private\nvisible\n");
+    let (arn, key) = iam_user(&router, "cat-reader").await;
+    let (status, _) = rest(&router, &first_host, &key, "GET", query, None).await;
+    assert_eq!(status, 403);
+    create_access_policy(
+        &router,
+        "cat-scope",
+        &data_policy(
+            "index",
+            &["index/cat-first/visible"],
+            &["aoss:DescribeIndex"],
+            &[&arn],
+        ),
+    )
+    .await;
+    let (status, rows) = rest(&router, &first_host, &key, "GET", query, None).await;
+    assert_eq!(
+        (status, rows),
+        (200, json!([{"index":"visible","docs.count":"0"}]))
+    );
+    let (status, rows) = rest(
+        &router,
+        &first_host,
+        AMBIENT_ACCESS_KEY_ID,
+        "GET",
+        query,
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, rows),
+        (
+            200,
+            json!([{"index":"private","docs.count":"0"},{"index":"visible","docs.count":"0"}])
+        )
+    );
+    let (status, _) = rest(
+        &router,
+        &first_host,
+        AMBIENT_ACCESS_KEY_ID,
+        "DELETE",
+        "/visible",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, rows) = rest(&router, &first_host, &key, "GET", query, None).await;
+    assert_eq!((status, rows), (200, json!([])));
+    let (status, rows) = rest(
+        &router,
+        &second_host,
+        AMBIENT_ACCESS_KEY_ID,
+        "GET",
+        query,
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, rows),
+        (200, json!([{"index":"foreign","docs.count":"0"}]))
+    );
+}

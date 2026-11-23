@@ -1107,7 +1107,7 @@ async fn the_data_plane_refuses_what_the_engine_refuses() {
     // A reserved endpoint this surface serves nothing for is answered as a path the engine
     // has no handler for — not read as an index of that name — and the two names the
     // engine reads as every index are served as such.
-    for path in ["/_nodes", "/_cat/indices", "/_cluster/health"] {
+    for path in ["/_nodes", "/_cluster/health"] {
         let (status, answer) = send(&router, &host, "GET", path, None).await;
         assert_eq!(
             status, 400,
@@ -1138,17 +1138,17 @@ async fn the_data_plane_refuses_what_the_engine_refuses() {
         status, 405,
         "case DELETE /present/_search: expected 405, got {status} with {answer}"
     );
-    let (status, answer) = send(&router, &host, "GET", "/_cat/indices", None).await;
+    let (status, answer) = send(&router, &host, "GET", "/_cat/unsupported", None).await;
     assert_eq!(
         status, 400,
-        "case GET /_cat/indices: expected 400, got {status} with {answer}"
+        "case GET /_cat/unsupported: expected 400, got {status} with {answer}"
     );
     assert!(
         answer
             .get("error")
             .and_then(Value::as_str)
             .is_some_and(|reason| reason.contains("no handler found")),
-        "case GET /_cat/indices: expected the engine's no-handler refusal, got {answer}"
+        "case GET /_cat/unsupported: expected the engine's no-handler refusal, got {answer}"
     );
 }
 

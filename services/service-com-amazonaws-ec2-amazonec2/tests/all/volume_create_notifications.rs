@@ -216,10 +216,10 @@ async fn queue(router: &MultiServiceRouter, case: &str, name: &str) -> (String, 
     (url, arn)
 }
 
-/// A default-bus rule matching every `aws.ec2` volume notification, delivering to the queue
+/// A default-bus rule matching the requested EC2 notification type, delivering to the queue
 /// `queue_arn`, and the queue's url — the ONE wiring both tests below watch the events
 /// through.
-async fn watched_queue(router: &MultiServiceRouter, case: &str, name: &str) -> String {
+async fn watched_queue(router: &MultiServiceRouter, case: &str, name: &str, detail_type: &str) -> String {
     let (url, queue_arn) = queue(router, case, name).await;
     events_ok(
         router,
@@ -230,7 +230,7 @@ async fn watched_queue(router: &MultiServiceRouter, case: &str, name: &str) -> S
             "State": "ENABLED",
             "EventPattern": json!({
                 "source": [EC2_EVENT_SOURCE],
-                "detail-type": [VOLUME_NOTIFICATION],
+                "detail-type": [detail_type],
             })
             .to_string(),
         }),
@@ -369,7 +369,7 @@ struct Row {
 #[tokio::test]
 async fn every_volume_create_publishes_one_notification_of_its_outcome() {
     let router = emulator();
-    let url = watched_queue(&router, "the volume notifications", "ebs-volume-events").await;
+    let url = watched_queue(&router, "the volume notifications", "ebs-volume-events", VOLUME_NOTIFICATION).await;
 
     // Each key is minted by KMS itself and then moved into the state its row is about,
     // through KMS's own API.
@@ -538,7 +538,7 @@ async fn every_volume_create_publishes_one_notification_of_its_outcome() {
 async fn a_replayed_client_token_publishes_no_second_notification() {
     let case = "a replayed client token";
     let router = emulator();
-    let url = watched_queue(&router, case, "ebs-volume-replays").await;
+    let url = watched_queue(&router, case, "ebs-volume-replays", VOLUME_NOTIFICATION).await;
 
     let token = vec![p("ClientToken", "one-and-the-same-create")];
     let (volume_id, volume_arn) = create_volume(&router, case, token.clone()).await;
@@ -571,4 +571,49 @@ async fn a_replayed_client_token_publishes_no_second_notification() {
         after.is_empty(),
         "case {case:?}: the replay created nothing, so it published nothing, got {after:?}"
     );
+}
+
+/// A registration that minted no AMI must not publish an available state. One real
+/// registration then witnesses that the same default-bus rule and queue are live.
+#[tokio::test]
+async fn only_a_successfully_registered_ami_publishes_its_available_state() {
+    let case = "registered AMI";
+    let router = emulator();
+    let url = watched_queue(&router, case, "ami-registration", "EC2 AMI State Change").await;
+    let (volume, _) = create_volume(&router, case, Vec::new()).await;
+    let (status, body) = call(&router, REGION, "CreateSnapshot", &[p("VolumeId", volume)]).await;
+    assert_eq!(status, 200, "{body}");
+    let snapshot = element(&body, "snapshotId").expect("CreateSnapshot returned its ID");
+    let mut params = vec![
+        p("Name", "registered-image"),
+        p("RootDeviceName", "/dev/sda1"),
+        p("BlockDeviceMapping.1.DeviceName", "/dev/sda1"),
+        p("BlockDeviceMapping.1.Ebs.SnapshotId", "snap-00000000000000000"),
+    ];
+    let (status, body) = call(&router, REGION, "RegisterImage", &params).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("InvalidSnapshotID.NotFound"), "{body}");
+    params[3] = p("BlockDeviceMapping.1.Ebs.SnapshotId", snapshot);
+    let (status, body) = call(&router, REGION, "RegisterImage", &params).await;
+    assert_eq!(status, 200, "{body}");
+    let image = element(&body, "imageId").expect("RegisterImage returned its ID");
+    let arn = format!("arn:aws:ec2:{REGION}::image/{image}");
+    let (events, others) = delivered_for(&router, case, &url, &arn).await;
+    assert!(others.is_empty(), "{others:?}");
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+    assert_eq!(event["source"], "aws.ec2");
+    assert_eq!(event["detail-type"], "EC2 AMI State Change");
+    assert_eq!(event["account"], engine::emulator_account_id());
+    assert_eq!(event["region"], REGION);
+    assert_eq!(event["resources"], json!([arn]));
+    assert_eq!(event["detail"]["ImageId"], image);
+    assert_eq!(event["detail"]["State"], "available");
+    assert_eq!(event["detail"]["ErrorMessage"], "");
+    assert!(event["detail"]["RequestId"].as_str().is_some_and(|id| !id.is_empty()));
+    // Give any stray best-effort publication its own independent delivery window.
+    for _ in 0..40 {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        assert!(drain(&router, case, &url).await.is_empty());
+    }
 }

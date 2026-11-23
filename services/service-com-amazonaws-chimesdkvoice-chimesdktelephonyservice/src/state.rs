@@ -247,6 +247,7 @@ pub fn tag_limit_reached(resource_arn: &str, requested: usize) -> ResourceLimitE
 /// directory ([`chime_tags`]), which is what the generic tagging routes read and write.
 #[derive(Debug, Clone)]
 pub struct VoiceConnectorRecord {
+    pub logging_configuration: Option<crate::ops::types::LoggingConfiguration>,
     pub voice_connector_id: String,
     pub name: String,
     pub aws_region: String,
@@ -286,6 +287,7 @@ impl VoiceConnectorRecord {
             voice_connector_arn,
             integration_type: None,
             network_type: None,
+            logging_configuration: None,
             created_timestamp: created,
             updated_timestamp: created,
         }

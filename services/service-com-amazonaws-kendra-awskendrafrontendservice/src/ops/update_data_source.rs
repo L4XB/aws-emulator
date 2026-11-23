@@ -188,10 +188,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         }
-        if let Some(cfg) = &input.configuration {
-            crate::state::validate_web_source(cfg)
-                .map_err(crate::scaffolded::Scaffolded::validation)?;
-        }
         if input.name.as_ref().is_some_and(|name| {
             index
                 .data_sources
@@ -207,6 +203,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message: Some("data source does not exist in index".into()),
             })
         })?;
+        if let Some(cfg) = &input.configuration {
+            crate::state::validate_connector(source.row.r#type.as_deref().unwrap_or(""), cfg)
+                .map_err(crate::scaffolded::Scaffolded::validation)?;
+        }
         if source.row.status.as_deref() != Some("ACTIVE") {
             return Err(
                 UpdateDataSourceErrorModeled::ConflictException(ConflictException {

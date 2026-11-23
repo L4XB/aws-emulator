@@ -315,7 +315,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        for (id, stored) in accepted {
+        for (id, mut stored) in accepted {
+            stored.replaced_existing = index.documents.contains_key(&id);
             index.documents.insert(id, stored);
         }
 
@@ -435,6 +436,7 @@ fn stored_document(
         attributes: document.attributes.clone().unwrap_or_default(),
         access_control_list: document.access_control_list.clone().unwrap_or_default(),
         s3_path: document.s3_path.clone(),
+        replaced_existing: false,
         indexed_at: now,
     })
 }

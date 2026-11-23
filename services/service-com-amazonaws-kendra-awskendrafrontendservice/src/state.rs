@@ -144,6 +144,8 @@ pub struct StoredDocument {
     pub access_control_list: Vec<Principal>,
     pub s3_path: Option<S3Path>,
     pub indexed_at: SystemTime,
+    /// Whether the last successful put replaced the existing document.
+    pub replaced_existing: bool,
     /// How often each term occurs in the title, counted ONCE at ingest so a query
     /// costs one lookup per query term rather than a scan of the document.
     pub title_term_counts: HashMap<String, u32>,

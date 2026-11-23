@@ -1390,3 +1390,70 @@ async fn the_account_takes_at_most_its_indices_quota() {
         "once the deleted index is gone its slot must be free again"
     );
 }
+
+#[tokio::test]
+async fn document_lifecycle_is_scoped_to_the_selected_index() {
+    let router = kendra();
+    let a = create_index(&router, "first").await;
+    let b = create_index(&router, "second").await;
+    wait_until_active(&router, &a).await;
+    wait_until_active(&router, &b).await;
+    for index in [&a, &b] {
+        put_text_document(&router, index, "same", "Title", "sharedmarker").await;
+    }
+    let status = |index: &str| {
+        json!({"IndexId": index, "DocumentInfoList": [
+        {"DocumentId": "same"}, {"DocumentId": "absent"}, {"DocumentId": "same"}]})
+    };
+    let expected = |state: &str| {
+        json!({"Errors": [], "DocumentStatusList": [
+        {"DocumentId":"same","DocumentStatus":state},{"DocumentId":"absent","DocumentStatus":"NOT_FOUND"}]})
+    };
+    assert_eq!(
+        call(&router, "BatchGetDocumentStatus", status(&a)).await,
+        (200, expected("INDEXED"))
+    );
+    put_text_document(&router, &a, "same", "Title", "replacementmarker").await;
+    assert_eq!(
+        call(&router, "BatchGetDocumentStatus", status(&a)).await,
+        (200, expected("UPDATED"))
+    );
+    let unsupported = json!({"IndexId":a,"DocumentIdList":["same"],"DataSourceSyncJobMetricTarget":{"DataSourceId":"00000000-0000-0000-0000-000000000000"}});
+    assert_eq!(
+        call(&router, "BatchDeleteDocument", unsupported).await.0,
+        501
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            call(
+                &router,
+                "BatchDeleteDocument",
+                json!({"IndexId":a,"DocumentIdList":["same","same","absent"]})
+            )
+            .await,
+            (200, json!({"FailedDocuments":[]}))
+        );
+    }
+    assert_eq!(
+        call(&router, "BatchGetDocumentStatus", status(&a)).await,
+        (200, expected("NOT_FOUND"))
+    );
+    assert_eq!(
+        call(&router, "BatchGetDocumentStatus", status(&b)).await,
+        (200, expected("INDEXED"))
+    );
+    for (idx, marker, count) in [(&a, "replacementmarker", 0), (&b, "sharedmarker", 1)] {
+        let (http, body) = call(&router, "Query", json!({"IndexId":idx,"QueryText":marker})).await;
+        assert_eq!(http, 200);
+        assert_eq!(body["TotalNumberOfResults"], count);
+    }
+    for (op, input) in [
+        ("BatchGetDocumentStatus", status(ABSENT_INDEX_ID)),
+        (
+            "BatchDeleteDocument",
+            json!({"IndexId":ABSENT_INDEX_ID,"DocumentIdList":["same"]}),
+        ),
+    ] {
+        assert_eq!(call(&router, op, input).await.0, 404);
+    }
+}

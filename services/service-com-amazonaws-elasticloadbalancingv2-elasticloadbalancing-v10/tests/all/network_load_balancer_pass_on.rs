@@ -97,12 +97,13 @@ async fn create_alb_target_group(
     router: &MultiServiceRouter,
     name: &str,
     target: &str,
+    port: &str,
 ) -> String {
     let mut form = action("CreateTargetGroup");
     form.push(p("Name", name));
     form.push(p("TargetType", "alb"));
     form.push(p("Protocol", "TCP"));
-    form.push(p("Port", "80"));
+    form.push(p("Port", port));
     form.push(p("HealthCheckProtocol", "HTTP"));
     form.push(p("VpcId", "vpc-12345678"));
     let reply = call(router, &form).await;
@@ -202,19 +203,25 @@ async fn a_network_load_balancer_is_answered_by_the_load_balancer_it_forwards_to
     // The chain under test: a Network Load Balancer whose TCP listener forwards to an `alb`
     // target group holding the Application Load Balancer above.
     let (network, network_dns) = create_load_balancer(&router, "pass-on-nlb", "network").await;
-    let group = create_alb_target_group(&router, "pass-on-targets", &application).await;
+    let group = create_alb_target_group(&router, "pass-on-targets", &application, "80").await;
     create_tcp_listener(&router, &network, &group).await;
+
+    let (wrong_port, wrong_port_dns) =
+        create_load_balancer(&router, "pass-on-port", "network").await;
+    let mismatched =
+        create_alb_target_group(&router, "pass-on-port-target", &application, "8080").await;
+    create_tcp_listener(&router, &wrong_port, &mismatched).await;
 
     // A chain that leads back to a load balancer already in it: the Network Load Balancer's
     // own ARN registered with the group its own listener forwards to.
     let (cyclic, cyclic_dns) = create_load_balancer(&router, "pass-on-cycle", "network").await;
-    let cyclic_group = create_alb_target_group(&router, "pass-on-cyclic", &cyclic).await;
+    let cyclic_group = create_alb_target_group(&router, "pass-on-cyclic", &cyclic, "80").await;
     create_tcp_listener(&router, &cyclic, &cyclic_group).await;
 
     // A registration naming a load balancer this service does not hold.
     let (absent, absent_dns) = create_load_balancer(&router, "pass-on-absent", "network").await;
     let absent_group =
-        create_alb_target_group(&router, "pass-on-missing", ABSENT_LOAD_BALANCER).await;
+        create_alb_target_group(&router, "pass-on-missing", ABSENT_LOAD_BALANCER, "80").await;
     create_tcp_listener(&router, &absent, &absent_group).await;
 
     // A chain of DISTINCT load balancers longer than the walk this plane follows: each one
@@ -232,6 +239,7 @@ async fn a_network_load_balancer_is_answered_by_the_load_balancer_it_forwards_to
                 &router,
                 &format!("pass-on-link-tg-{link}"),
                 &arn,
+                "80",
             )
             .await;
             let previous = chain.last().expect("the previous link");
@@ -243,7 +251,7 @@ async fn a_network_load_balancer_is_answered_by_the_load_balancer_it_forwards_to
     // The clock-owed moves, placed rather than slept for: every load balancer is active and
     // every registration is healthy.
     let past = SystemTime::now() - Duration::from_secs(1);
-    for arn in [&application, &network, &cyclic, &absent]
+    for arn in [&application, &network, &wrong_port, &cyclic, &absent]
         .into_iter()
         .chain(chain.iter())
     {
@@ -253,6 +261,13 @@ async fn a_network_load_balancer_is_answered_by_the_load_balancer_it_forwards_to
     // The rows: the host each request is addressed to — the name a load balancer publishes —
     // the path asked for, and the answer the chain behind that name produces.
     let rows: &[(&str, &str, &str, u16, &str)] = &[
+        (
+            "no listener accepts the registered target port",
+            &wrong_port_dns,
+            "/orders/42",
+            UNREACHABLE_STATUS,
+            "",
+        ),
         (
             "a path the rule of the load balancer behind the chain matches",
             &network_dns,

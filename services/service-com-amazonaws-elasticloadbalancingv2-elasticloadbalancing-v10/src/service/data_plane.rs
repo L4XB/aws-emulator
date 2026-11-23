@@ -1059,8 +1059,17 @@ pub async fn serve<Eng: Send + Sync + 'static>(
             if now < record.active_at {
                 return rendered(&Served::status(PROVISIONING_STATUS));
             }
-            let Some(listener) = listener_addressed(&store, record, addressed_port) else {
-                return rendered(&Served::status(PROVISIONING_STATUS));
+            let listener = match listener_addressed(&store, record, addressed_port) {
+                Some(listener) if walked.is_empty() => listener,
+                // A published front door may use the emulator's own port. A forwarded
+                // connection has the target registration's port and requires that listener.
+                Some(listener) if addressed_port.is_some() && listener.port == addressed_port => {
+                    listener
+                }
+                _ if !walked.is_empty() => {
+                    return rendered(&Served::status(TARGET_UNREACHABLE_STATUS));
+                }
+                _ => return rendered(&Served::status(PROVISIONING_STATUS)),
             };
             listener_arn = listener.arn.clone();
             (

@@ -138,6 +138,34 @@ pub struct StoredDataSource {
     pub transition_at: Option<SystemTime>,
 }
 
+/// Validate configuration shape without accessing a connected data source.
+pub fn validate_connector(kind: &str, cfg: &crate::ops::types::DataSourceConfiguration) -> Result<(), &'static str> {
+    if kind == "WEBCRAWLER" {
+        return validate_web_source(cfg);
+    }
+    let bucket = cfg.s3_configuration.as_ref().ok_or("S3Configuration is required")?;
+    if kind != "S3" || bucket.bucket_name.trim().is_empty() || cfg.web_crawler_configuration.is_some() || cfg.share_point_configuration.is_some()
+        || cfg.database_configuration.is_some()
+        || cfg.salesforce_configuration.is_some()
+        || cfg.one_drive_configuration.is_some()
+        || cfg.service_now_configuration.is_some()
+        || cfg.confluence_configuration.is_some()
+        || cfg.google_drive_configuration.is_some()
+        || cfg.work_docs_configuration.is_some()
+        || cfg.fsx_configuration.is_some()
+        || cfg.slack_configuration.is_some()
+        || cfg.box_configuration.is_some()
+        || cfg.quip_configuration.is_some()
+        || cfg.jira_configuration.is_some()
+        || cfg.git_hub_configuration.is_some()
+        || cfg.alfresco_configuration.is_some()
+        || cfg.template_configuration.is_some()
+ {
+        return Err("expected exactly one S3 bucket connector");
+    }
+    Ok(())
+}
+
 /// Validate the two mutually exclusive URL source forms accepted by a web crawler.
 pub fn validate_web_source(
     cfg: &crate::ops::types::DataSourceConfiguration,

@@ -202,7 +202,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         }
-        if input.r#type != "WEBCRAWLER" || input.tags.as_ref().is_some_and(|t| !t.is_empty()) {
+        if !matches!(input.r#type.as_str(), "WEBCRAWLER" | "S3") || input.tags.as_ref().is_some_and(|t| !t.is_empty()) {
             return Err(crate::scaffolded::Scaffolded::not_implemented(
                 "other connector types or data source tags",
             ));
@@ -210,11 +210,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let configuration = input.configuration.as_ref().ok_or_else(|| {
             crate::scaffolded::Scaffolded::validation("configuration is required")
         })?;
-        crate::state::validate_web_source(configuration)
+        crate::state::validate_connector(&input.r#type, configuration)
             .map_err(crate::scaffolded::Scaffolded::validation)?;
         if input.role_arn.is_none() {
             return Err(crate::scaffolded::Scaffolded::validation(
-                "RoleArn is required for WEBCRAWLER",
+                "RoleArn is required for this connector",
             ));
         }
         if let Some(token) = &input.client_token {

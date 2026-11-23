@@ -3130,6 +3130,7 @@ mod launch_volume_keys;
 /// The event an EBS volume's create OUTCOME is published as, onto the account's default
 /// EventBridge bus. Everything it declares is re-exported below, so a handler reaches it as
 /// `crate::state::VolumeNotification` like any other primitive of this module.
+mod image_notifications;
 mod volume_notifications;
 /// The event every change of an INSTANCE's state is published as, onto that same bus.
 /// Everything it declares is re-exported below, so a handler reaches it as
@@ -3200,6 +3201,7 @@ pub use service_link_virtual_interfaces::*;
 pub use tag_descriptions::*;
 pub use volume_encryption::*;
 pub use launch_volume_keys::*;
+pub(crate) use image_notifications::publish_registered_image;
 pub use volume_notifications::*;
 pub use instance_state_notifications::*;
 pub use volumes::*;

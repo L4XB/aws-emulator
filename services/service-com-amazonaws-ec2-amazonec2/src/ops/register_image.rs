@@ -246,12 +246,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         use crate::state;
 
-        // `ctx` carries request metadata only, and nothing about an AMI is a fact of the
-        // Region the request was signed for (the modelled `Image` carries no Region member),
-        // so this operation reads none of it. The store is reached through the engine held on
-        // `self`.
-        let _ = ctx;
-
         // "A name for your AMI" (`Name`) is `@required` but modelled `clientOptional`, so a
         // request that left it out reaches this handler as an empty string rather than being
         // refused at the boundary. A parameter the request did not carry is EC2's
@@ -475,6 +469,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "the image just registered could not be read back",
             ));
         }
+        drop(store);
+        state::publish_registered_image(
+            ctx.callback().clone(),
+            state::request_region(ctx.parts()),
+            image_id.clone(),
+        );
         Ok(RegisterImageOutput {
             image_id: Some(image_id),
         })

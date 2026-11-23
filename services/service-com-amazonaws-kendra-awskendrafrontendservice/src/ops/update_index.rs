@@ -238,7 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut state = store.lock();
         let now = std::time::SystemTime::now();
         state.materialize_due_transitions(now);
-        let index = state.indexes.get_mut(&input.id).ok_or_else(|| {
+        let index = state.index_mut(&input.id).ok_or_else(|| {
             UpdateIndexErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
                 message: Some("index is absent".into()),
             })

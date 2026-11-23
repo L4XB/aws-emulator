@@ -139,12 +139,21 @@ pub struct StoredDataSource {
 }
 
 /// Validate configuration shape without accessing a connected data source.
-pub fn validate_connector(kind: &str, cfg: &crate::ops::types::DataSourceConfiguration) -> Result<(), &'static str> {
+pub fn validate_connector(
+    kind: &str,
+    cfg: &crate::ops::types::DataSourceConfiguration,
+) -> Result<(), &'static str> {
     if kind == "WEBCRAWLER" {
         return validate_web_source(cfg);
     }
-    let bucket = cfg.s3_configuration.as_ref().ok_or("S3Configuration is required")?;
-    if kind != "S3" || bucket.bucket_name.trim().is_empty() || cfg.web_crawler_configuration.is_some() || cfg.share_point_configuration.is_some()
+    let bucket = cfg
+        .s3_configuration
+        .as_ref()
+        .ok_or("S3Configuration is required")?;
+    if kind != "S3"
+        || bucket.bucket_name.trim().is_empty()
+        || cfg.web_crawler_configuration.is_some()
+        || cfg.share_point_configuration.is_some()
         || cfg.database_configuration.is_some()
         || cfg.salesforce_configuration.is_some()
         || cfg.one_drive_configuration.is_some()
@@ -160,7 +169,7 @@ pub fn validate_connector(kind: &str, cfg: &crate::ops::types::DataSourceConfigu
         || cfg.git_hub_configuration.is_some()
         || cfg.alfresco_configuration.is_some()
         || cfg.template_configuration.is_some()
- {
+    {
         return Err("expected exactly one S3 bucket connector");
     }
     Ok(())
@@ -254,6 +263,8 @@ pub struct Index {
     /// The `ClientToken` of the `CreateIndex` call that minted this index, so a
     /// retry with the same token answers with this same `Id`.
     pub client_token: Option<String>,
+    pub metadata_overrides:
+        std::collections::BTreeMap<String, crate::ops::types::DocumentMetadataConfiguration>,
     pub documents: HashMap<String, StoredDocument>,
     /// Indexed question-answer pairs (`CreateFaq` is not implemented yet, so no
     /// call can raise this above zero).

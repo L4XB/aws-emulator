@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateIndex
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
+//! Metadata-only configuration is implemented. Other update dimensions are outside the fixture.
+//! Historical scaffold: this operation answers HTTP 501 `NotImplemented` and
 //! asserts NOTHING about `UpdateIndex`'s real behaviour. Implement it here — this is
 //! the ONLY file to touch for this operation.
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken". Replace the `Err(..)` in [`UpdateIndex::handle`] with real behaviour and
 //! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
+//! which operations are still stubs (`grep -rl '^//! Metadata-only configuration is implemented. Other update dimensions are outside the fixture.
+//! Historical scaffold:' */src/ops/`),
 //! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
@@ -133,7 +135,12 @@ impl UpdateIndexOutput {
 pub static UPDATE_INDEX_OUTPUT_SCHEMA: &::aws_smithy_schema::Schema = &UpdateIndexOutput::SCHEMA;
 
 impl ::aws_smithy_schema::serde::SerializableStruct for UpdateIndexOutput {
-    fn serialize_members(&self, _s: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer) -> Result<(), ::aws_smithy_schema::serde::SerdeError> { Ok(()) }
+    fn serialize_members(
+        &self,
+        _s: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer,
+    ) -> Result<(), ::aws_smithy_schema::serde::SerdeError> {
+        Ok(())
+    }
 }
 
 // The operation's MODELED errors. `#[operation_error]` accepts only variants the
@@ -195,7 +202,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     type Error = UpdateIndexError;
 
     const NAME: &'static str = "UpdateIndex";
-    const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::UPDATE_INDEX_INPUT_SCHEMA;
+    const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema =
+        super::types::UPDATE_INDEX_INPUT_SCHEMA;
     const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = UPDATE_INDEX_OUTPUT_SCHEMA;
     const SUCCESS_STATUS: u16 = 200u16;
 
@@ -204,18 +212,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateIndex` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateIndexErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateIndex"))
+        let _ = ctx;
+        if input.name.is_some()
+            || input.role_arn.is_some()
+            || input.description.is_some()
+            || input.capacity_units.is_some()
+            || input.user_token_configurations.is_some()
+            || input.user_context_policy.is_some()
+            || input.user_group_resolution_configuration.is_some()
+        {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "non-metadata index updates",
+            ));
+        }
+        let updates = input
+            .document_metadata_configuration_updates
+            .ok_or_else(|| {
+                crate::scaffolded::Scaffolded::validation("metadata updates required")
+            })?;
+        let store = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateIndexErrorModeled::InternalServerException(InternalServerException {
+                message: Some("Kendra state unavailable".into()),
+            })
+        })?;
+        let mut state = store.lock();
+        let now = std::time::SystemTime::now();
+        state.materialize_due_transitions(now);
+        let index = state.indexes.get_mut(&input.id).ok_or_else(|| {
+            UpdateIndexErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+                message: Some("index is absent".into()),
+            })
+        })?;
+        if index.status != "ACTIVE" {
+            return Err(
+                UpdateIndexErrorModeled::ConflictException(ConflictException {
+                    message: Some("index is not active".into()),
+                })
+                .into(),
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for field in &updates {
+            if !seen.insert(&field.name)
+                || field.name.trim().is_empty()
+                || !matches!(
+                    field.r#type.as_str(),
+                    "STRING_VALUE" | "STRING_LIST_VALUE" | "LONG_VALUE" | "DATE_VALUE"
+                )
+                || index
+                    .metadata_overrides
+                    .get(&field.name)
+                    .is_some_and(|previous| previous.r#type != field.r#type)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    "invalid or conflicting field definition",
+                ));
+            }
+        }
+        for field in updates {
+            index.metadata_overrides.insert(field.name.clone(), field);
+        }
+        index.updated_at = now;
+        Ok(UpdateIndexOutput)
     }
 }

@@ -224,9 +224,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             description: index.description.clone(),
             created_at: Some(::aws_smithy_types::DateTime::from(index.created_at)),
             updated_at: Some(::aws_smithy_types::DateTime::from(index.updated_at)),
-            // `UpdateIndex` owns the metadata configuration and the capacity units,
-            // and is not implemented yet, so this index carries neither.
-            document_metadata_configurations: None,
+            // Report only configured overrides. No synthetic reserved-field defaults.
+            document_metadata_configurations: (!index.metadata_overrides.is_empty())
+                .then(|| index.metadata_overrides.values().cloned().collect()),
             index_statistics: Some(IndexStatistics {
                 faq_statistics: FaqStatistics {
                     indexed_question_answers_count: index.faq_count,

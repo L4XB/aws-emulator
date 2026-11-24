@@ -862,3 +862,81 @@ async fn an_alarm_driven_policy_waits_for_the_cooldown_its_last_change_left() {
         "case {case:?}: the cooldown holds the second firing back, got {after_second}"
     );
 }
+
+#[tokio::test]
+async fn two_alarms_route_to_their_own_policy_generation_and_group() {
+    let router = router();
+    let case = "independent simple and step alarms with the same policy name";
+    let groups = ["simple-group", "step-group"];
+    let alarms = ["simple-alarm", "step-alarm"];
+    let policy_name = "scale-out";
+    for group in groups {
+        group_with(&router, case, group, (0, 3), 0, 0, &[]).await;
+    }
+    let simple = put_policy(
+        &router,
+        case,
+        groups[0],
+        policy_name,
+        "ChangeInCapacity",
+        1,
+        &[p("Cooldown", "0")],
+    )
+    .await;
+    let step = asg(
+        &router,
+        case,
+        "PutScalingPolicy",
+        &[
+            ("AutoScalingGroupName", groups[1]),
+            ("PolicyName", policy_name),
+            ("PolicyType", "StepScaling"),
+            ("AdjustmentType", "ChangeInCapacity"),
+            ("EstimatedInstanceWarmup", "0"),
+            ("StepAdjustments.member.1.MetricIntervalLowerBound", "0"),
+            ("StepAdjustments.member.1.ScalingAdjustment", "2"),
+        ],
+    )
+    .await;
+    let policy_arns = [simple, element(&step, "PolicyARN")];
+    assert_ne!(policy_arns[0], policy_arns[1]);
+    for (alarm, policy) in alarms.iter().zip(&policy_arns) {
+        put_alarm(&router, case, alarm, "AlarmActions", policy).await;
+    }
+    for i in 0..2 {
+        let other = 1 - i;
+        let before = instance_ids(&router, case, groups[other]).await;
+        let before_causes = activity_causes(&router, case, groups[other]).await;
+        cw(&router, case, REGION, "SetAlarmState", &json!({
+            "AlarmName":alarms[i], "StateValue":"ALARM", "StateReason":format!("controlled-{i}"),
+            "StateReasonData":r#"{"version":"1.0","recentDatapoints":[12.0],"threshold":10.0}"#
+        })).await;
+        let items = recorded_actions(&router, case, alarms[i], &policy_arns[i], 1).await;
+        assert_action_recorded(case, &items, &policy_arns[i], "ALARM");
+        assert_eq!(action_history(&router, case, alarms[i]).await.len(), 1);
+        let desired = (i + 1) as i32;
+        assert_eq!(
+            settled_capacity(&router, case, groups[i], desired).await,
+            desired
+        );
+        assert_eq!(
+            instance_ids(&router, case, groups[i]).await.len(),
+            desired as usize
+        );
+        assert!(activity_causes(&router, case, groups[i])
+            .await
+            .iter()
+            .any(|cause| cause.contains(alarms[i])
+                && cause.contains(policy_name)
+                && cause.contains("ALARM")));
+        assert_eq!(instance_ids(&router, case, groups[other]).await, before);
+        assert_eq!(
+            activity_causes(&router, case, groups[other]).await,
+            before_causes
+        );
+        assert_eq!(
+            desired_capacity(&router, case, groups[other]).await,
+            i as i32
+        );
+    }
+}

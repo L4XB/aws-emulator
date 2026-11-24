@@ -300,6 +300,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
+        let notify_store = store.clone();
         let mut store = store.lock();
         let Some(vault) = store.vaults.get_mut(&(account_id.clone(), vault_name.clone())) else {
             return Err(InitiateJobErrorModeled::ResourceNotFoundException(
@@ -307,6 +308,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+
+        if vault.vault_arn != state::vault_arn(&region, &vault_name) {
+            return Err(InitiateJobErrorModeled::ResourceNotFoundException(
+                state::vault_not_found(&region, &vault_name),
+            ).into());
+        }
 
         // Settle first, so the count below reflects what is actually retained: a job
         // whose retention the clock has already run out does not occupy capacity just
@@ -359,6 +366,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             output_size_in_bytes: None,
             content_type: String::new(),
             sns_topic: parameters.sns_topic,
+            completion_topics: Vec::new(),
             due_at: ::std::time::Instant::now() + state::JOB_COMPLETION_DELAY,
             expires_at: None,
             sequence: 0,
@@ -546,6 +554,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let (sequence, job_id) = store.mint_id("job");
         job.job_id = job_id.clone();
         job.sequence = sequence;
+        let due_at = job.due_at;
         // Inserted under exactly the id that was minted and is about to be returned.
         store
             .vaults
@@ -554,10 +563,95 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .jobs
             .insert(job_id.clone(), job);
 
+        drop(store);
+        tokio::spawn(publish_completion(
+            notify_store, ctx.callback().clone(), (account_id.clone(), vault_name.clone()),
+            job_id.clone(), region, due_at,
+        ));
+
         Ok(InitiateJobOutput {
             location: Some(format!("/{account_id}/vaults/{vault_name}/jobs/{job_id}")),
             job_id: Some(job_id),
             job_output_path: None,
         })
+    }
+}
+
+/// Complete the job even without a reader; publish captured destinations outside the store lock.
+/// The callback connector routes every signed Publish inside this emulator. A vault event
+/// subscription and a job-specific topic each receive a message, even when both point to
+/// the same topic. See <https://docs.aws.amazon.com/amazonglacier/latest/dev/configuring-notifications.html>.
+async fn publish_completion(
+    notify_store: engine::ServiceState<crate::state::ComAmazonawsGlacierGlacierState>,
+    callback: smithy_server_runtime::EmbeddedEmulator,
+    key: (String, String),
+    notification_job: String,
+    region: String,
+    due_at: std::time::Instant,
+) {
+    use crate::state;
+    tokio::time::sleep_until(due_at.into()).await;
+    let notifications = {
+        let mut store = notify_store.lock();
+        let Some(vault) = store.vaults.get_mut(&key) else {
+            return;
+        };
+        state::settle_due_jobs(vault);
+        let Some(job) = vault.jobs.get(&notification_job) else {
+            return;
+        };
+        if !job.completed {
+            return;
+        }
+        let mut messages = Vec::new();
+        for topic in &job.completion_topics {
+            let prefix = format!("arn:aws:sns:{region}:{}:", key.0);
+            if !topic
+                .strip_prefix(&prefix)
+                .is_some_and(|name| !name.is_empty() && !name.contains(':'))
+            {
+                continue;
+            }
+            let message = serde_json::json!({
+                "JobId":job.job_id, "JobDescription":job.description, "Action":job.action,
+                "ArchiveId":job.archive_id, "VaultARN":vault.vault_arn, "CreationDate":job.creation_date,
+                "Completed":job.completed, "StatusCode":job.status_code, "StatusMessage":job.status_message,
+                "ArchiveSizeInBytes":job.archive_size_in_bytes, "CompletionDate":job.completion_date,
+                "InventorySizeInBytes":(job.action == state::ACTION_INVENTORY_RETRIEVAL).then_some(job.output_size_in_bytes).flatten(),
+                "SHA256TreeHash":job.sha256_tree_hash, "SNSTopic":topic,
+            });
+            messages.push((topic.clone(), message.to_string()));
+        }
+        messages
+    };
+    if notifications.is_empty() {
+        return;
+    }
+    use aws_sdk_sns::config::{
+        BehaviorVersion, IdentityCache, Region, StalledStreamProtectionConfig,
+    };
+    let conf = aws_sdk_sns::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .http_client(callback.http_client())
+        .credentials_provider(callback.aws_credentials_provider())
+        .region(Region::new(region.clone()))
+        .endpoint_url(format!("https://sns.{region}.amazonaws.com"))
+        .retry_config(aws_sdk_sns::config::retry::RetryConfig::disabled())
+        .timeout_config(aws_sdk_sns::config::timeout::TimeoutConfig::disabled())
+        .identity_cache(IdentityCache::no_cache())
+        .stalled_stream_protection(StalledStreamProtectionConfig::disabled())
+        .build();
+    let client = aws_sdk_sns::Client::from_conf(conf);
+    for (topic, message) in notifications {
+        if client
+            .publish()
+            .topic_arn(topic)
+            .message(message)
+            .send()
+            .await
+            .is_err()
+        {
+            tracing::warn!("Glacier job completed but its local SNS publication failed");
+        }
     }
 }

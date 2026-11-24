@@ -180,6 +180,8 @@ pub struct Job {
     pub output_size_in_bytes: Option<i64>,
     pub content_type: String,
     pub sns_topic: Option<String>,
+    /// Topic choices at the actual completion transition, before a later reconfiguration.
+    pub completion_topics: Vec<String>,
     /// The instant the clock owes this job's move to `Succeeded`. Never slept for.
     pub due_at: Instant,
     /// The instant this job is released, set when it completes. See [`JOB_RETENTION`].
@@ -550,6 +552,17 @@ pub fn settle_due_jobs(vault: &mut Vault) {
         } else {
             i64::try_from(job.output.len()).unwrap_or(i64::MAX)
         });
+        let event = if job.action == ACTION_INVENTORY_RETRIEVAL {
+            "InventoryRetrievalCompleted"
+        } else {
+            "ArchiveRetrievalCompleted"
+        };
+        if let Some(topic) = vault.notification_config.as_ref()
+            .filter(|config| config.events.as_ref().is_some_and(|events| events.iter().any(|e| e == event)))
+            .and_then(|config| config.sns_topic.as_ref()) {
+            job.completion_topics.push(topic.clone());
+        }
+        job.completion_topics.extend(job.sns_topic.iter().cloned());
         job.completed = true;
         job.status_code = STATUS_SUCCEEDED.to_string();
         job.status_message = Some(STATUS_SUCCEEDED.to_string());

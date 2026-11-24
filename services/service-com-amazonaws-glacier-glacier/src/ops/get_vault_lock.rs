@@ -146,7 +146,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let vault = store.vaults.get(&(account, input.vault_name))
             .filter(|vault| vault.vault_arn == arn)
             .ok_or(GetVaultLockErrorModeled::ResourceNotFoundException(missing))?;
-        vault.lock_policy.clone().ok_or_else(|| {
+        let now = aws_smithy_types::DateTime::from(std::time::SystemTime::now());
+        vault.lock_policy.as_ref().filter(|policy| {
+            policy.state.as_deref() != Some("InProgress") || policy.expiration_date.as_deref()
+                .and_then(state::parse_iso8601)
+                .is_some_and(|expiry| expiry > (now.secs(), now.subsec_nanos()))
+        }).cloned().ok_or_else(|| {
             GetVaultLockErrorModeled::ResourceNotFoundException(
                 state::resource_not_found("The vault has no lock policy"),
             ).into()

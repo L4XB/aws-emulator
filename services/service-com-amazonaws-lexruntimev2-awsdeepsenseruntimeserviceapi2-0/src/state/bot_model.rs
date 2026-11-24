@@ -301,7 +301,7 @@ pub fn built_locale<Eng: Send + Sync + 'static>(
     let bot_version = control_plane
         .bot_aliases
         .get(&lexmodels::state::bot_alias_key(bot_id, bot_alias_id))
-        .map(|alias| alias.bot_version.clone())
+        .and_then(|alias| alias.bot_version.clone())
         .ok_or(LocaleUnavailable::UnknownBotAlias)?;
 
     // `settled_bot_locale` applies the status transition the clock has already

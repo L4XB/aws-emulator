@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateBotAlias
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateBotAlias`'s real behaviour. Implement it here — this is
+//! Stores caller-supplied alias settings on the bot-scoped alias record.
 //! the ONLY file to touch for this operation.
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
@@ -186,18 +185,70 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateBotAlias` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateBotAliasErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateBotAlias"))
+        use crate::state::{bot_alias_key, to_date_time, DRAFT_BOT_VERSION, TEST_BOT_ALIAS_ID};
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateBotAliasErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the Lex Models V2 store is unavailable".into()),
+            })
+        })?;
+        let mut store = state.lock();
+        let missing = || UpdateBotAliasErrorModeled::PreconditionFailedException(PreconditionFailedException {
+            message: Some(crate::state::PARENT_RESOURCE_NOT_FOUND_MESSAGE.into()),
+        });
+        if !store.bots.contains_key(&input.bot_id) {
+            return Err(missing().into());
+        }
+        let key = bot_alias_key(&input.bot_id, &input.bot_alias_id);
+        let current = store.bot_aliases.get(&key).ok_or_else(missing)?;
+        let version = input.bot_version.or_else(|| current.bot_version.clone());
+        if input.bot_alias_id == TEST_BOT_ALIAS_ID
+            && (input.bot_alias_name != crate::state::TEST_BOT_ALIAS_NAME || version.as_deref() != Some(DRAFT_BOT_VERSION))
+        {
+            return Err(crate::scaffolded::Scaffolded::validation("The test alias must point to DRAFT and retain its test name."));
+        }
+        if let Some(v) = &version {
+            if v == DRAFT_BOT_VERSION && input.bot_alias_id != TEST_BOT_ALIAS_ID {
+                return Err(crate::scaffolded::Scaffolded::validation("Only the test alias can point to DRAFT."));
+            }
+            if !store.bot_version_exists(&input.bot_id, v) {
+                return Err(missing().into());
+            }
+        }
+        if store.bot_aliases_of_bot(&input.bot_id).any(|a| a.bot_alias_name == input.bot_alias_name && a.bot_alias_id != input.bot_alias_id) {
+            return Err(UpdateBotAliasErrorModeled::ConflictException(ConflictException {
+                message: Some("An alias with this name already exists for this bot.".into()),
+            }).into());
+        }
+        let now = std::time::SystemTime::now();
+        let alias = store.bot_aliases.get_mut(&key).ok_or_else(missing)?;
+        alias.bot_alias_name = input.bot_alias_name;
+        alias.bot_version = version;
+        if let Some(settings) = input.bot_alias_locale_settings {
+            alias.bot_alias_locale_settings = Some(settings);
+        }
+        if let Some(settings) = input.conversation_log_settings {
+            alias.conversation_log_settings = Some(settings);
+        }
+        if let Some(settings) = input.sentiment_analysis_settings {
+            alias.sentiment_analysis_settings = Some(settings);
+        }
+        if let Some(description) = input.description {
+            alias.description = Some(description);
+        }
+        alias.last_updated_date_time = now;
+        Ok(UpdateBotAliasOutput {
+            bot_alias_id: Some(alias.bot_alias_id.clone()),
+            bot_alias_name: Some(alias.bot_alias_name.clone()),
+            description: alias.description.clone(),
+            bot_version: alias.bot_version.clone(),
+            bot_alias_locale_settings: alias.bot_alias_locale_settings.clone(),
+            conversation_log_settings: alias.conversation_log_settings.clone(),
+            sentiment_analysis_settings: alias.sentiment_analysis_settings.clone(),
+            bot_alias_status: Some(alias.bot_alias_status.clone()),
+            bot_id: Some(alias.bot_id.clone()),
+            creation_date_time: Some(to_date_time(alias.creation_date_time)),
+            last_updated_date_time: Some(to_date_time(now)),
+        })
     }
 }

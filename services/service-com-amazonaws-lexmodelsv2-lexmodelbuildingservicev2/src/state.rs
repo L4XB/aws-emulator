@@ -497,7 +497,11 @@ pub struct BotAlias {
     pub description: Option<String>,
     /// The version of the bot this alias points at: a number, or
     /// [`DRAFT_BOT_VERSION`] for the working copy.
-    pub bot_version: String,
+    pub bot_version: Option<String>,
+    pub bot_alias_locale_settings: Option<HashMap<String, crate::ops::types::BotAliasLocaleSettings>>,
+    pub conversation_log_settings: Option<crate::ops::types::ConversationLogSettings>,
+    pub sentiment_analysis_settings: Option<crate::ops::types::SentimentAnalysisSettings>,
+    pub tags: Option<HashMap<String, String>>,
     pub bot_alias_status: String,
     pub creation_date_time: SystemTime,
     pub last_updated_date_time: SystemTime,
@@ -517,7 +521,11 @@ impl BotAlias {
             bot_alias_id: TEST_BOT_ALIAS_ID.to_string(),
             bot_alias_name: TEST_BOT_ALIAS_NAME.to_string(),
             description: None,
-            bot_version: DRAFT_BOT_VERSION.to_string(),
+            bot_version: Some(DRAFT_BOT_VERSION.to_string()),
+            bot_alias_locale_settings: None,
+            conversation_log_settings: None,
+            sentiment_analysis_settings: None,
+            tags: None,
             bot_alias_status: BOT_ALIAS_STATUS_AVAILABLE.to_string(),
             creation_date_time: now,
             last_updated_date_time: now,
@@ -530,7 +538,7 @@ impl BotAlias {
             bot_alias_id: Some(self.bot_alias_id.clone()),
             bot_alias_name: Some(self.bot_alias_name.clone()),
             description: self.description.clone(),
-            bot_version: Some(self.bot_version.clone()),
+            bot_version: self.bot_version.clone(),
             bot_alias_status: Some(self.bot_alias_status.clone()),
             creation_date_time: Some(to_date_time(self.creation_date_time)),
             last_updated_date_time: Some(to_date_time(self.last_updated_date_time)),
@@ -1223,6 +1231,17 @@ impl ComAmazonawsLexmodelsv2Lexmodelbuildingservicev2State {
             .filter_map(|(_, version)| version.parse::<u32>().ok())
             .max()
             .map(|latest| latest.to_string())
+    }
+
+    /// Mint an alias ID in the bot's namespace, preserving the built-in test alias.
+    pub fn mint_alias_id(&mut self, bot_id: &str) -> String {
+        loop {
+            self.id_seq += 1;
+            let id = render_id(self.id_seq);
+            if id != TEST_BOT_ALIAS_ID && !self.bot_aliases.contains_key(&bot_alias_key(bot_id, &id)) {
+                return id;
+            }
+        }
     }
 
     /// Does the store hold the version of the bot this pair names? The `DRAFT` version of

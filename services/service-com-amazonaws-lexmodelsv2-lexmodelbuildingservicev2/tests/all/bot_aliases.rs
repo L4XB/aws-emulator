@@ -352,3 +352,25 @@ async fn a_listing_request_outside_what_the_model_accepts_is_refused() {
         );
     }
 }
+
+#[tokio::test]
+async fn describe_alias_matches_listing_and_refuses_unknown_pairs() {
+    let router = emulator();
+    let bot = create_bot(&router, &create_body("DescribeAliasBot", 120, json!({}))).await;
+    let (_, listed) = list(&router, &bot, json!({})).await;
+    let alias = &listed["botAliasSummaries"][0];
+    let uri = format!("{}/{}", aliases_uri(&bot), state::TEST_BOT_ALIAS_ID);
+    let (status, row) = call(&router, "GET", &uri, None).await;
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["botId"], bot);
+    for field in ["botAliasId", "botAliasName", "botVersion", "botAliasStatus",
+                  "creationDateTime", "lastUpdatedDateTime"] {
+        assert_eq!(row[field], alias[field], "{field}");
+        assert!(!row[field].is_null(), "{field}");
+    }
+    for path in [format!("{}/ZZZZZZZZZZ", aliases_uri(&bot)),
+                 format!("{}/{}", aliases_uri("ZZZZZZZZZZ"), state::TEST_BOT_ALIAS_ID)] {
+        let (status, body) = call(&router, "GET", &path, None).await;
+        assert_eq!(status, 404, "{body}");
+    }
+}

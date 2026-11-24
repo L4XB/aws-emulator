@@ -568,3 +568,55 @@ async fn a_locale_is_reachable_only_under_its_own_bot_version_and_id() {
         "a deleted bot's locale must be gone, got {status} {response:?}"
     );
 }
+
+#[tokio::test]
+async fn bot_locale_inventory_is_scoped_filtered_and_paged() {
+    let router = emulator();
+    let bot = host_bot(&router, "LocaleInventory").await;
+    let other = host_bot(&router, "OtherLocaleInventory").await;
+    let uri = |id: &str, version: &str| locales_uri(id, version);
+    for locale in ["en_US", "de_DE"] {
+        let (status, _) = call(
+            &router,
+            "PUT",
+            &locales_uri(&bot, "DRAFT"),
+            Some(locale_body(locale, 0.5, json!({}))),
+        )
+        .await;
+        assert_eq!(status, 202);
+    }
+    let list = uri(&bot, "DRAFT");
+    let (status, first) = call(&router, "POST", &list, Some(json!({"maxResults":1}))).await;
+    assert_eq!(status, 200, "{first}");
+    let token = &first["nextToken"];
+    assert!(token.is_string());
+    let (_, second) = call(&router, "POST", &list, Some(json!({"nextToken":token}))).await;
+    assert!(second["nextToken"].is_null());
+    let a = &first["botLocaleSummaries"][0];
+    let b = &second["botLocaleSummaries"][0];
+    assert!(a["localeName"].as_str().unwrap() < b["localeName"].as_str().unwrap());
+    let (_, desc) = call(
+        &router,
+        "POST",
+        &list,
+        Some(json!({"sortBy":{"attribute":"BotLocaleName","order":"Descending"}})),
+    )
+    .await;
+    assert_eq!(desc["botLocaleSummaries"][0]["localeId"], b["localeId"]);
+    for operator in ["EQ", "CO"] {
+        let (_, filtered) = call(&router, "POST", &list, Some(json!({"filters":[{"name":"BotLocaleName","operator":operator,"values":[a["localeName"]]}]}))).await;
+        assert_eq!(filtered["botLocaleSummaries"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["botLocaleSummaries"][0]["localeId"], a["localeId"]);
+    }
+    let (status, empty) = call(&router, "POST", &uri(&other, "DRAFT"), Some(json!({}))).await;
+    assert_eq!(status, 200);
+    assert_eq!(empty["botLocaleSummaries"], json!([]));
+    for (path, body) in [
+        (uri(&other, "DRAFT"), json!({"nextToken":token})),
+        (uri(&bot, "9"), json!({})),
+        (uri("0000000000", "DRAFT"), json!({})),
+        (list, json!({"nextToken":"invalid"})),
+    ] {
+        assert_eq!(call(&router, "POST", &path, Some(body)).await.0, 400);
+    }
+}

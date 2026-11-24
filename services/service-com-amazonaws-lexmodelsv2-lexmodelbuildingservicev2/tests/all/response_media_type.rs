@@ -117,11 +117,11 @@ async fn every_response_announces_the_media_type_this_service_answers_under() {
             status: 400,
         },
         Answered {
-            case: "an operation nobody has written yet",
+            case: "listing the intents stored in a locale",
             method: "POST",
             uri: format!("{}/intents", locale_uri(&bot_id, "DRAFT", "en_US")),
             body: Some(json!({})),
-            status: 501,
+            status: 200,
         },
         Answered {
             case: "a request that names no modelled operation",

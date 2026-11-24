@@ -487,3 +487,31 @@ async fn a_namespace_scoped_access_policy_is_confined_to_its_namespaces() {
         }
     }
 }
+
+/// The endpoint cannot choose one of two different actions on behalf of a caller.
+#[tokio::test]
+async fn ambiguous_action_attributes_are_refused_before_deciding_access() {
+    let router = emulator();
+    let config = provisioned_cluster(&router, "review-one-action", true).await;
+    for spec in [
+        serde_json::json!({}),
+        serde_json::json!({
+            "resourceAttributes": {"namespace": SCOPED_NAMESPACE, "verb": "list", "resource": "pods"},
+            "nonResourceAttributes": {"verb": "get", "path": "/version"},
+        }),
+    ] {
+        let request = serde_json::json!({
+            "kind": "SelfSubjectAccessReview", "apiVersion": "authorization.k8s.io/v1", "spec": spec,
+        });
+        let answered = dial(
+            &config,
+            "invalid action choice",
+            "POST",
+            REVIEWS_PATH,
+            Some(&request),
+        )
+        .await;
+        assert_eq!(answered.status, 422);
+        assert!(answered.body.pointer("/status/allowed").is_none());
+    }
+}

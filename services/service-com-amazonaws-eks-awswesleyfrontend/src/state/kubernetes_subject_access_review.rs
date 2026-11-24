@@ -164,7 +164,20 @@ pub fn reviewed_attributes(review: &::serde_json::Value) -> Option<RequestAttrib
             .unwrap_or_default()
             .to_string()
     };
-    if let Some(resource) = spec.get("resourceAttributes") {
+    let resource = spec
+        .get("resourceAttributes")
+        .filter(|value| !value.is_null());
+    let non_resource = spec
+        .get("nonResourceAttributes")
+        .filter(|value| !value.is_null());
+    if resource.is_some() == non_resource.is_some()
+        || resource
+            .or(non_resource)
+            .is_some_and(|value| !value.is_object())
+    {
+        return None;
+    }
+    if let Some(resource) = resource {
         return Some(RequestAttributes {
             verb: member(resource, "verb"),
             api_group: member(resource, "group"),
@@ -177,7 +190,7 @@ pub fn reviewed_attributes(review: &::serde_json::Value) -> Option<RequestAttrib
             path: String::new(),
         });
     }
-    let non_resource = spec.get("nonResourceAttributes")?;
+    let non_resource = non_resource?;
     Some(RequestAttributes {
         verb: member(non_resource, "verb"),
         path: member(non_resource, "path"),

@@ -683,3 +683,124 @@ async fn a_submitted_build_is_recorded_and_settles_from_building_to_built() {
         );
     }
 }
+
+/// Exercise the public list route against distinct locale stores, including the seeded fallback.
+#[tokio::test]
+async fn list_intents_scopes_summaries_filters_and_continuations() {
+    let router = emulator();
+    let bot = host_locale(&router, "IntentList", "en_US").await;
+    let peer = host_locale(&router, "OtherIntentList", "en_US").await;
+    let uri = intents_uri(&bot, "DRAFT", "en_US");
+    for name in ["ProbeBeta", "ProbeAlpha"] {
+        create_intent(
+            &router,
+            &bot,
+            "en_US",
+            &intent_body(name, json!({"description":"summary text"})),
+        )
+        .await;
+    }
+    create_intent(
+        &router,
+        &peer,
+        "en_US",
+        &intent_body("ProbeOther", json!({})),
+    )
+    .await;
+    let query = json!({"sortBy":{"attribute":"IntentName","order":"Descending"},
+        "filters":[{"name":"IntentName","operator":"CO","values":["Probe"]}],"maxResults":1});
+    let (status, first) = call(&router, "POST", &uri, Some(query.clone())).await;
+    assert_eq!(status, 200, "{first:?}");
+    assert_eq!(first["botId"], bot);
+    assert_eq!(first["botVersion"], "DRAFT");
+    assert_eq!(first["localeId"], "en_US");
+    let item = &first["intentSummaries"][0];
+    assert_eq!(item["intentName"], "ProbeBeta");
+    assert_eq!(item["description"], "summary text");
+    assert!(item["lastUpdatedDateTime"].is_number());
+    assert!(item.get("sampleUtterances").is_none());
+    let mut next = query.clone();
+    next["nextToken"] = first["nextToken"].clone();
+    assert!(next["nextToken"].is_string());
+    let (status, second) = call(&router, "POST", &uri, Some(next.clone())).await;
+    assert_eq!(status, 200, "{second:?}");
+    assert_eq!(second["intentSummaries"][0]["intentName"], "ProbeAlpha");
+    assert!(second.get("nextToken").is_none());
+    for path in [
+        intents_uri(&peer, "DRAFT", "en_US"),
+        intents_uri(&bot, "1", "en_US"),
+        intents_uri(&bot, "DRAFT", "de_DE"),
+    ] {
+        let (status, body) = call(&router, "POST", &path, Some(next.clone())).await;
+        assert_eq!(status, 400, "{body:?}");
+        assert_eq!(error_code(&body), "ValidationException");
+    }
+    next["filters"][0]["operator"] = json!("EQ");
+    assert_eq!(call(&router, "POST", &uri, Some(next)).await.0, 400);
+    let exact = json!({"filters":[{"name":"IntentName","operator":"EQ","values":["Probe"]}]});
+    assert_eq!(
+        call(&router, "POST", &uri, Some(exact)).await.1["intentSummaries"],
+        json!([])
+    );
+    for body in [
+        json!({"nextToken":"bogus"}),
+        json!({"maxResults":0}),
+        json!({"filters":[{"name":"IntentName","operator":"CO","values":["x","y"]}]}),
+        json!({"sortBy":{"attribute":"Unsupported","order":"Ascending"}}),
+    ] {
+        assert_eq!(call(&router, "POST", &uri, Some(body)).await.0, 400);
+    }
+    let sorted = json!({"sortBy":{"attribute":"LastUpdatedDateTime","order":"Ascending"}});
+    let (status, body) = call(&router, "POST", &uri, Some(sorted)).await;
+    assert_eq!(status, 200);
+    let entries = body["intentSummaries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(
+        entries
+            .iter()
+            .any(|x| x["parentIntentSignature"] == "AMAZON.FallbackIntent")
+    );
+    assert!(
+        entries
+            .windows(2)
+            .all(|pair| pair[0]["lastUpdatedDateTime"].as_f64()
+                <= pair[1]["lastUpdatedDateTime"].as_f64())
+    );
+}
+
+#[tokio::test]
+async fn list_intents_preserves_published_locale_snapshot() {
+    let router = emulator();
+    let bot = host_locale(&router, "FrozenIntent", "en_US").await;
+    create_intent(
+        &router,
+        &bot,
+        "en_US",
+        &intent_body("AlwaysPresent", json!({})),
+    )
+    .await;
+    let (status, response) = call(
+        &router,
+        "PUT",
+        &format!("/bots/{bot}/botversions"),
+        Some(json!({"botVersionLocaleSpecification":{"en_US":{"sourceBotVersion":"DRAFT"}}})),
+    )
+    .await;
+    assert_eq!(status, 202, "{response:?}");
+    let version = text(&response, "botVersion");
+    create_intent(&router, &bot, "en_US", &intent_body("DraftOnly", json!({}))).await;
+    for (scope, want) in [(version.as_str(), 0), ("DRAFT", 1)] {
+        let query =
+            json!({"filters":[{"name":"IntentName","operator":"EQ","values":["DraftOnly"]}]});
+        let (status, page) = call(
+            &router,
+            "POST",
+            &intents_uri(&bot, scope, "en_US"),
+            Some(query),
+        )
+        .await;
+        assert_eq!(status, 200, "{page:?}");
+        assert_eq!(page["botVersion"], scope);
+        assert_eq!(page["intentSummaries"].as_array().unwrap().len(), want);
+    }
+}

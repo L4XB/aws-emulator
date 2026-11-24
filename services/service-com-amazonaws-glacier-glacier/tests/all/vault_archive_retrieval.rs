@@ -59,6 +59,7 @@ const REGION: &str = "us-west-2";
 // ---------------------------------------------------------------------------
 
 struct Emulator {
+    engine: Arc<engine::InMemoryEngine>,
     router: MultiServiceRouter,
 }
 
@@ -69,8 +70,8 @@ impl Emulator {
         // These requests carry an unsigned, syntactically valid credential scope: it is
         // what routes them to `glacier`, not what authenticates them.
         router.set_request_authentication(false);
-        router.register_service(EmulatedService::new(engine));
-        Self { router }
+        router.register_service(EmulatedService::new(engine.clone()));
+        Self { engine, router }
     }
 
     async fn send(
@@ -2062,4 +2063,30 @@ async fn vault_notification_configuration_isolated_replaced_and_removed() {
     assert_eq!(status(&emulator.send("DELETE", path, &[], &[]).await), 204);
     assert_eq!(status(&emulator.send("GET", path, &[], &[]).await), 404);
     assert_eq!(json(&emulator.send("GET", other, &[], &[]).await), initial);
+}
+
+#[tokio::test]
+async fn vault_lock_readback_is_local_to_its_vault() {
+    let emulator = Emulator::new();
+    for name in ["first", "second"] {
+        assert_eq!(status(&emulator.create_vault("-", name).await), 201);
+        let reply = emulator.send("GET", &format!("/-/vaults/{name}/lock-policy"), &[], &[]).await;
+        assert_eq!(status(&reply), 404);
+    }
+    // Seed the read model only; no lock is completed or enforced.
+    let store = service_com_amazonaws_glacier_glacier::state::service_state(&*emulator.engine).unwrap();
+    store.lock().vaults.get_mut(&(account_id().to_string(), "first".to_string())).unwrap().lock_policy =
+        Some(service_com_amazonaws_glacier_glacier::ops::types::GetVaultLockOutput {
+            state: Some("InProgress".into()), policy: Some("fixture-policy".into()),
+            creation_date: Some("2026-01-01T00:00:00Z".into()), expiration_date: Some("2026-01-02T00:00:00Z".into()),
+        });
+    let reply = emulator.send("GET", "/-/vaults/first/lock-policy", &[], &[]).await;
+    assert_eq!(status(&reply), 200);
+    let data: serde_json::Value = serde_json::from_slice(reply.body()).unwrap();
+    assert_eq!(data["State"], "InProgress");
+    assert_eq!(data["Policy"], "fixture-policy");
+    assert_eq!(data["ExpirationDate"], "2026-01-02T00:00:00Z");
+    for name in ["second","missing"] {
+        assert_eq!(status(&emulator.send("GET", &format!("/-/vaults/{name}/lock-policy"), &[], &[]).await), 404);
+    }
 }

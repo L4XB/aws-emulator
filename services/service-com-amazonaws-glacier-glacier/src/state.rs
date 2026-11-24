@@ -228,6 +228,8 @@ pub struct Vault {
     pub tags: HashMap<String, String>,
     pub access_policy: Option<String>,
     pub notification_config: Option<VaultNotificationConfig>,
+    /// The lock subresource, independent of the vault access policy.
+    pub lock_policy: Option<crate::ops::types::GetVaultLockOutput>,
     pub multipart_uploads: HashMap<String, MultipartUpload>,
 }
 

@@ -374,3 +374,33 @@ async fn describe_alias_matches_listing_and_refuses_unknown_pairs() {
         assert_eq!(status, 404, "{body}");
     }
 }
+
+#[tokio::test]
+async fn described_locale_settings_follow_only_the_written_alias() {
+    let router = emulator();
+    let bot = create_bot(&router, &create_body("AliasReadWriteBot", 120, json!({}))).await;
+    let aliases = aliases_uri(&bot);
+    let original = json!({"en_US": {"enabled": true}, "de_DE": {"enabled": false}});
+    let (status, created) = call(&router, "PUT", &aliases, Some(json!({
+        "botAliasName": "Preview",
+        "botAliasLocaleSettings": original
+    }))).await;
+    assert_eq!(status, 202, "{created}");
+    let uri = format!("{}/{}", aliases, text(&created, "botAliasId"));
+    let (status, read) = call(&router, "GET", &uri, None).await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["botAliasLocaleSettings"], original);
+    assert!(read.get("botVersion").is_none());
+    let changed = json!({"en_US": {"enabled": false}});
+    let (status, updated) = call(&router, "PUT", &uri, Some(json!({
+        "botAliasName":"Preview", "botAliasLocaleSettings": changed
+    }))).await;
+    assert_eq!(status, 202, "{updated}");
+    let (status, read) = call(&router, "GET", &uri, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(read["botAliasLocaleSettings"], changed);
+    let (status, test_alias) = call(&router, "GET", &format!("{aliases}/TSTALIASID"), None).await;
+    assert_eq!(status, 200);
+    assert!(test_alias.get("botAliasLocaleSettings").is_none());
+    assert_eq!(test_alias["botVersion"], "DRAFT");
+}

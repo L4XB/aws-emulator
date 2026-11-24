@@ -59,6 +59,7 @@ const REGION: &str = "us-west-2";
 // ---------------------------------------------------------------------------
 
 struct Emulator {
+    engine: Arc<engine::InMemoryEngine>,
     router: MultiServiceRouter,
 }
 
@@ -69,8 +70,8 @@ impl Emulator {
         // These requests carry an unsigned, syntactically valid credential scope: it is
         // what routes them to `glacier`, not what authenticates them.
         router.set_request_authentication(false);
-        router.register_service(EmulatedService::new(engine));
-        Self { router }
+        router.register_service(EmulatedService::new(engine.clone()));
+        Self { engine, router }
     }
 
     async fn send(
@@ -80,14 +81,26 @@ impl Emulator {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> Response<Bytes> {
+        self.send_in_region(REGION, method, path, headers, body)
+            .await
+    }
+
+    async fn send_in_region(
+        &self,
+        region: &str,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Response<Bytes> {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
-            .header("host", format!("glacier.{REGION}.amazonaws.com"))
+            .header("host", format!("glacier.{region}.amazonaws.com"))
             .header(
                 "authorization",
                 format!(
-                    "AWS4-HMAC-SHA256 Credential=AKIDGLACIERTEST/20261021/{REGION}/glacier/aws4_request, \
+                    "AWS4-HMAC-SHA256 Credential=AKIDGLACIERTEST/20261021/{region}/glacier/aws4_request, \
                      SignedHeaders=host, Signature=0000"
                 ),
             );
@@ -1959,6 +1972,150 @@ async fn a_resource_that_is_not_stored_is_refused_with_the_modelled_error() {
                 .await,
             400,
             "InvalidParameterValueException",
+        );
+    }
+}
+
+#[tokio::test]
+async fn vault_notification_configuration_isolated_replaced_and_removed() {
+    let emulator = Emulator::new();
+    for vault in ["first", "second"] {
+        assert_eq!(status(&emulator.create_vault("-", vault).await), 201);
+    }
+    let path = "/-/vaults/first/notification-configuration";
+    let other = "/-/vaults/second/notification-configuration";
+    let absent = "/-/vaults/absent/notification-configuration";
+    let explicit = path.replacen("/-/", &format!("/{}/", account_id()), 1);
+    let foreign = path.replacen("/-/", "/111222333444/", 1);
+    let config = |name: &str, events: &[&str]| {
+        serde_json::json!({
+            "SNSTopic": format!("arn:aws:sns:{REGION}:{}:{name}", account_id()), "Events": events
+        })
+    };
+    let initial = config(
+        "initial",
+        &["ArchiveRetrievalCompleted", "InventoryRetrievalCompleted"],
+    );
+    let replacement = config("replacement", &["InventoryRetrievalCompleted"]);
+    let initial_bytes = serde_json::to_vec(&initial).unwrap();
+    assert_eq!(status(&emulator.send("GET", path, &[], &[]).await), 404);
+    for endpoint in [path, other] {
+        assert_eq!(
+            status(&emulator.send("PUT", endpoint, &[], &initial_bytes).await),
+            204
+        );
+        assert_eq!(
+            json(&emulator.send("GET", endpoint, &[], &[]).await),
+            initial
+        );
+    }
+    assert_eq!(
+        status(
+            &emulator
+                .send(
+                    "PUT",
+                    &explicit,
+                    &[],
+                    &serde_json::to_vec(&replacement).unwrap()
+                )
+                .await
+        ),
+        204
+    );
+    for body in [
+        serde_json::json!({}),
+        config("initial", &[]),
+        config("initial", &["other"]),
+        serde_json::json!({"Events":["ArchiveRetrievalCompleted"]}),
+    ] {
+        assert_eq!(
+            status(
+                &emulator
+                    .send("PUT", path, &[], &serde_json::to_vec(&body).unwrap())
+                    .await
+            ),
+            400
+        );
+    }
+    for (method, body) in [
+        ("GET", &[][..]),
+        ("PUT", initial_bytes.as_slice()),
+        ("DELETE", &[][..]),
+    ] {
+        assert_eq!(status(&emulator.send(method, absent, &[], body).await), 404);
+        assert_eq!(
+            status(&emulator.send(method, &foreign, &[], body).await),
+            400
+        );
+        assert_eq!(
+            status(
+                &emulator
+                    .send_in_region("us-east-1", method, path, &[], body)
+                    .await
+            ),
+            404
+        );
+    }
+    assert_eq!(
+        json(&emulator.send("GET", path, &[], &[]).await),
+        replacement
+    );
+    assert_eq!(status(&emulator.send("DELETE", path, &[], &[]).await), 204);
+    assert_eq!(status(&emulator.send("GET", path, &[], &[]).await), 404);
+    assert_eq!(json(&emulator.send("GET", other, &[], &[]).await), initial);
+}
+
+#[tokio::test]
+async fn vault_lock_readback_is_local_to_its_vault() {
+    let emulator = Emulator::new();
+    for name in ["first", "second"] {
+        assert_eq!(status(&emulator.create_vault("-", name).await), 201);
+        let reply = emulator
+            .send("GET", &format!("/-/vaults/{name}/lock-policy"), &[], &[])
+            .await;
+        assert_eq!(status(&reply), 404);
+    }
+    // Seed the read model only; no lock is completed or enforced.
+    let store =
+        service_com_amazonaws_glacier_glacier::state::service_state(&*emulator.engine).unwrap();
+    store
+        .lock()
+        .vaults
+        .get_mut(&(account_id().to_string(), "first".to_string()))
+        .unwrap()
+        .lock_policy = Some(
+        service_com_amazonaws_glacier_glacier::ops::types::GetVaultLockOutput {
+            state: Some("InProgress".into()),
+            policy: Some("fixture-policy".into()),
+            creation_date: Some("2099-01-01T00:00:00Z".into()),
+            expiration_date: Some("2099-01-02T00:00:00Z".into()),
+        },
+    );
+    let reply = emulator
+        .send("GET", "/-/vaults/first/lock-policy", &[], &[])
+        .await;
+    assert_eq!(status(&reply), 200);
+    let data: serde_json::Value = serde_json::from_slice(reply.body()).unwrap();
+    assert_eq!(data["State"], "InProgress");
+    assert_eq!(data["Policy"], "fixture-policy");
+    assert_eq!(data["ExpirationDate"], "2099-01-02T00:00:00Z");
+    store
+        .lock()
+        .vaults
+        .get_mut(&(account_id().to_string(), "first".to_string()))
+        .unwrap()
+        .lock_policy
+        .as_mut()
+        .unwrap()
+        .expiration_date = Some("2000-01-01T00:00:00Z".into());
+    for name in ["first", "second", "missing"] {
+        assert_eq!(
+            status(
+                &emulator
+                    .send("GET", &format!("/-/vaults/{name}/lock-policy"), &[], &[])
+                    .await
+            ),
+            404
         );
     }
 }

@@ -866,12 +866,10 @@ pub async fn open_cache_data_plane<Eng: Send + Sync + 'static>(
     })
 }
 
-/// Whether this emulator serves a data plane for a cache running `engine`.
+/// Whether this cache engine speaks RESP.
 ///
-/// Valkey and Redis OSS speak RESP, which is the wire [`resp_wire`] serves. Memcached
-/// speaks its own text protocol, which this emulator has nothing to answer with, so a
-/// Memcached cache gets no socket and keeps the name ElastiCache's own zone would carry
-/// rather than publishing a port that would answer the wrong protocol.
+/// Valkey and Redis OSS use [`resp_wire`]. The single-member Memcached text listener
+/// has its own eligibility checks and separate data store.
 pub fn engine_speaks_resp(engine: &str) -> bool {
     matches!(
         engine.to_ascii_lowercase().as_str(),
@@ -884,7 +882,7 @@ pub fn engine_speaks_resp(engine: &str) -> bool {
 /// reach.
 ///
 /// Called by the create once the record is stored. Does nothing for a cluster that already
-/// has a socket, for a Memcached cluster, or on an engine that vends no listeners — in
+/// has a socket, for unsupported cache shapes, or on an engine that vends no listeners — in
 /// which case the cluster keeps the name ElastiCache's own zone would carry.
 pub async fn serve_cache_cluster<Eng: Send + Sync + 'static>(
     engine: &Eng,

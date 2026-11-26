@@ -281,10 +281,9 @@ impl Collector {
 
 impl HttpConnector for Collector {
     fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
-        self.captured
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Captured {
+        let captured = {
+            let mut requests = self.captured.lock().unwrap_or_else(PoisonError::into_inner);
+            requests.push(Captured {
                 method: request.method().to_string(),
                 uri: request.uri().to_string(),
                 headers: request
@@ -294,6 +293,8 @@ impl HttpConnector for Collector {
                     .collect(),
                 body: request.body().bytes().unwrap_or_default().to_vec(),
             });
+            requests.clone()
+        };
         let body = match self.answer {
             Answer::Acknowledges | Answer::PendingOnce
                 if request
@@ -301,9 +302,15 @@ impl HttpConnector for Collector {
                     .to_string()
                     .ends_with("/services/collector/ack") =>
             {
-                let captured = self.captured();
-                let intake = captured.first().expect("captured intake");
                 let poll = captured.last().expect("captured ACK query");
+                let channel = poll.header("x-splunk-request-channel");
+                let intake = captured
+                    .iter()
+                    .find(|req| {
+                        !req.uri.ends_with("/services/collector/ack")
+                            && req.header("x-splunk-request-channel") == channel
+                    })
+                    .expect("intake on poll channel");
                 assert!(intake.header("x-splunk-request-channel").is_some());
                 assert_eq!(
                     intake.header("x-splunk-request-channel"),
@@ -320,7 +327,14 @@ impl HttpConnector for Collector {
                         .uri
                         .replace("/services/collector/event", "/services/collector/ack")
                 );
-                let indexed = self.answer != Answer::PendingOnce || captured.len() >= 3;
+                let indexed = self.answer != Answer::PendingOnce
+                    || captured
+                        .iter()
+                        .filter(|req| {
+                            req.uri == poll.uri && req.header("x-splunk-request-channel") == channel
+                        })
+                        .count()
+                        > 1;
                 json!({"acks":{"73":indexed}}).to_string()
             }
             Answer::DisabledAck => json!({"code":14,"text":"ACK is disabled"}).to_string(),

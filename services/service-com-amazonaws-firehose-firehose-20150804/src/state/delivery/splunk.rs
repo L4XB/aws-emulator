@@ -63,6 +63,13 @@ const SPLUNK_ACK_TIMEOUT: DeliveryFailure = DeliveryFailure {
                     acknowledgement timeout expired.",
 };
 
+/// HEC explicitly returned HTTP 400 and code 14 (ACK is disabled).
+const SPLUNK_DISABLED_ACK: DeliveryFailure = DeliveryFailure {
+    output_type: SPLUNK_FAILED_OUTPUT_TYPE,
+    error_code: "Splunk.DisabledAck",
+    error_message: "Indexer acknowledgment is disabled for the HEC token.",
+};
+
 /// The failure of a buffer the collector refused the token of.
 const SPLUNK_INVALID_TOKEN: DeliveryFailure = DeliveryFailure {
     output_type: SPLUNK_FAILED_OUTPUT_TYPE,
@@ -238,10 +245,10 @@ pub fn splunk_targets(config: &DestinationConfigKind) -> Vec<SplunkTarget> {
 /// The request is the one the HTTP Event Collector takes: a `POST` of the buffered records to
 /// the configured endpoint, authorized with the HEC token under the collector's own scheme,
 /// carrying the records' own bytes — verbatim for a `Raw` endpoint, and one event document
-/// per line for an `Event` one, which is how several events are sent in one request. The
-/// answer hands the buffer over only when it is a success status whose body states the
-/// collector took the events; anything else, and any request that could not be made at all,
-/// is a failed delivery whose class the error output names.
+/// per line for an Event endpoint. The intake returns a numeric acknowledgment ID.
+/// Firehose posts that ID to the same collector mount and waits for an affirmative
+/// answer for that ID on the original channel. The one-second polling interval is a
+/// local scheduling choice.
 ///
 /// The attempt is bounded by `HECAcknowledgmentTimeoutInSeconds`: an answer that has not
 /// arrived by the end of that period is the acknowledgment timeout, which is what that member
@@ -258,19 +265,91 @@ pub(super) async fn post_to_collector(
     // budget (`crate::state::MAX_BUFFERED_BYTES_PER_STREAM`) the put already charged against.
     let raw = splunk.endpoint_type == RAW_ENDPOINT_TYPE;
     let body = collector_body(&delivery.records, raw);
-    let mut request = ::http::Request::builder()
-        .method(::http::Method::POST)
-        .uri(&splunk.endpoint)
-        .header(
-            ::http::header::CONTENT_TYPE,
+    let channel = ::uuid::Uuid::new_v4().to_string();
+    let endpoint = splunk
+        .endpoint
+        .parse::<::http::Uri>()
+        .map_err(|_| SPLUNK_CONNECTION_CLOSED)?;
+    let mut parts = endpoint.clone().into_parts();
+    if parts.authority.is_none() || parts.scheme.is_none() {
+        return Err(SPLUNK_CONNECTION_CLOSED);
+    }
+    // Preserve the collector mount when a reverse proxy exposes several recipients on one authority.
+    let path = endpoint.path().trim_end_matches('/');
+    let mount = [
+        "/services/collector/raw",
+        "/services/collector/event",
+        "/services/collector",
+    ]
+    .into_iter()
+    .find_map(|suffix| path.strip_suffix(suffix))
+    .unwrap_or("");
+    parts.path_and_query = Some(
+        format!("{mount}/services/collector/ack")
+            .parse()
+            .map_err(|_| SPLUNK_CONNECTION_CLOSED)?,
+    );
+    let ack_endpoint = ::http::Uri::from_parts(parts).map_err(|_| SPLUNK_CONNECTION_CLOSED)?;
+    let exchange = async {
+        let response = hec_post(
+            transport,
+            splunk,
+            &channel,
+            &endpoint,
             if raw {
                 "text/plain"
             } else {
                 "application/json"
             },
-        );
-    if let Some(host) = authority_of(&splunk.endpoint) {
-        request = request.header(::http::header::HOST, host);
+            body,
+        )
+        .await?;
+        let id = acknowledgment_id(&response).map_err(|_| SPLUNK_ACK_TIMEOUT)?;
+        let query = ::serde_json::json!({ "acks": [id] }).to_string();
+        loop {
+            let response = hec_post(
+                transport,
+                splunk,
+                &channel,
+                &ack_endpoint,
+                "application/json",
+                query.as_bytes().to_vec(),
+            )
+            .await?;
+            let answer = response
+                .body()
+                .bytes()
+                .and_then(|bytes| ::serde_json::from_slice::<::serde_json::Value>(bytes).ok());
+            match answer
+                .as_ref()
+                .and_then(|value| value.get("acks"))
+                .and_then(|acks| acks.get(id.to_string()))
+                .and_then(|flag| flag.as_bool())
+            {
+                Some(true) => return Ok(()),
+                Some(false) => ::tokio::time::sleep(Duration::from_secs(1)).await,
+                None => return Err(SPLUNK_ACK_TIMEOUT),
+            }
+        }
+    };
+    ::tokio::time::timeout(splunk.acknowledgment_timeout, exchange)
+        .await
+        .map_err(|_| SPLUNK_ACK_TIMEOUT)?
+}
+
+async fn hec_post(
+    transport: &SharedHttpConnector,
+    splunk: &SplunkTarget,
+    channel: &str,
+    endpoint: &::http::Uri,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Result<::aws_smithy_runtime_api::client::orchestrator::HttpResponse, DeliveryFailure> {
+    let mut request = ::http::Request::post(endpoint)
+        .header(::http::header::CONTENT_TYPE, content_type)
+        .header("x-splunk-request-channel", channel);
+    if let Some(authority) = endpoint.authority() {
+        request = request.header(::http::header::HOST, authority.as_str());
     }
     if let Some(token) = splunk.token.as_deref() {
         request = request.header(
@@ -278,70 +357,29 @@ pub(super) async fn post_to_collector(
             format!("{HEC_AUTHORIZATION_SCHEME} {token}"),
         );
     }
-    // Every value above comes from the configuration, so an `HECEndpoint` that is not a URI
-    // or a token that is not a header value fails HERE rather than panicking.
     let request = request
-        .body(::aws_smithy_types::body::SdkBody::from(
-            ::bytes::Bytes::from(body),
-        ))
-        .map_err(|error| error.to_string())
-        .and_then(|request| {
-            ::aws_smithy_runtime_api::http::Request::try_from(request)
-                .map_err(|error| error.to_string())
-        });
-    let request = match request {
-        Ok(request) => request,
-        Err(error) => {
-            ::tracing::warn!(
-                stream = %delivery.stream,
-                error = %error,
-                "the Splunk destination's configuration does not render a delivery request, \
-                 so nothing was delivered to it"
-            );
-            return Err(SPLUNK_CONNECTION_CLOSED);
-        }
-    };
-    let attempt = HttpConnector::call(transport, request);
-    let answered = match ::tokio::time::timeout(splunk.acknowledgment_timeout, attempt).await {
-        Ok(answered) => answered,
-        Err(_) => {
-            ::tracing::warn!(
-                stream = %delivery.stream,
-                timeout = ?splunk.acknowledgment_timeout,
-                "the Splunk destination did not acknowledge this delivery inside the \
-                 configured acknowledgment timeout"
-            );
-            return Err(SPLUNK_ACK_TIMEOUT);
-        }
-    };
-    let response = answered.map_err(|error| {
-        ::tracing::warn!(
-            stream = %delivery.stream,
-            error = %error,
-            "the Splunk destination could not be reached, so this delivery was left for a \
-             later one"
-        );
-        SPLUNK_CONNECTION_CLOSED
-    })?;
+        .body(::aws_smithy_types::body::SdkBody::from(body))
+        .map_err(|_| SPLUNK_CONNECTION_CLOSED)?;
+    let request = ::aws_smithy_runtime_api::http::Request::try_from(request)
+        .map_err(|_| SPLUNK_CONNECTION_CLOSED)?;
+    let response = HttpConnector::call(transport, request)
+        .await
+        .map_err(|_| SPLUNK_CONNECTION_CLOSED)?;
     let status = response.status().as_u16();
+    if status == 400
+        && response
+            .body()
+            .bytes()
+            .and_then(|bytes| ::serde_json::from_slice::<::serde_json::Value>(bytes).ok())
+            .and_then(|answer| answer.get("code").and_then(|code| code.as_u64()))
+            == Some(14)
+    {
+        return Err(SPLUNK_DISABLED_ACK);
+    }
     if !(200..300).contains(&status) {
-        ::tracing::warn!(
-            stream = %delivery.stream,
-            status,
-            "the Splunk destination did not take this delivery"
-        );
         return Err(refused_with(status));
     }
-    if let Err(reason) = acknowledges(&response) {
-        ::tracing::warn!(
-            stream = %delivery.stream,
-            status,
-            reason,
-            "the Splunk destination's answer does not acknowledge this delivery"
-        );
-        return Err(SPLUNK_ACK_TIMEOUT);
-    }
-    Ok(())
+    Ok(response)
 }
 
 /// The body of one delivery request: the buffered records' own bytes, in arrival order.
@@ -376,17 +414,11 @@ fn refused_with(status: u16) -> DeliveryFailure {
     }
 }
 
-/// Whether the collector's answer says it TOOK the events, or why it does not.
-///
-/// The HTTP Event Collector answers one JSON document stating what it did, whose `code` is
-/// zero for the events it took. So an answer hands this buffer over only when its body is a
-/// JSON object carrying that code; anything else — an unreadable or non-JSON body, a body
-/// stating no code, a body stating another one — is a buffer the collector has not
-/// acknowledged, which is then retried and finally parked exactly like one it refused
-/// outright.
-fn acknowledges(
+/// Extract the intake receipt used to query the indexer on this channel.
+/// A zero intake code establishes acceptance before confirmation of indexing.
+fn acknowledgment_id(
     response: &::aws_smithy_runtime_api::client::orchestrator::HttpResponse,
-) -> Result<(), &'static str> {
+) -> Result<u64, &'static str> {
     let Some(body) = response.body().bytes() else {
         return Err("the answer's body could not be read");
     };
@@ -402,7 +434,10 @@ fn acknowledges(
     if code != ANSWER_SUCCESS_CODE {
         return Err("the answer states a code of its own");
     }
-    Ok(())
+    answer
+        .get("ackId")
+        .and_then(::serde_json::Value::as_u64)
+        .ok_or("missing acknowledgment ID")
 }
 
 #[cfg(test)]
@@ -521,7 +556,11 @@ mod tests {
             ("no retry options", None, DEFAULT_SPLUNK_RETRY_DURATION),
             ("the range's floor", Some(0), Duration::ZERO),
             ("a minute", Some(60), Duration::from_secs(60)),
-            ("the range's ceiling", Some(7_200), Duration::from_secs(7_200)),
+            (
+                "the range's ceiling",
+                Some(7_200),
+                Duration::from_secs(7_200),
+            ),
         ];
         for (case, configured, expected) in rows {
             let targets = splunk_targets(&configuration(

@@ -370,6 +370,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             attributes: std::collections::HashMap::new(),
             tags: tag_map(input.tags.as_deref()),
             targets: std::collections::BTreeMap::new(),
+            round_robin_cursor: Default::default(),
         };
 
         let mut guard = state.lock();

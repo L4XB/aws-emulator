@@ -187,8 +187,9 @@ pub(super) fn list_or_absent(values: &[String]) -> Option<Vec<String>> {
 
 /// The inbound rules Lightsail opens on a newly created instance's firewall:
 /// the platform's management port (SSH for Linux/Unix, RDP for Windows) and HTTP,
-/// both reachable from anywhere. Taken from the Lightsail user guide's
-/// "Firewalls and ports" description of a new instance's default rules.
+/// and HTTPS for CMS application images, reachable from every supported family.
+/// See the AWS Lightsail User Guide, "Default Lightsail firewall rules":
+/// <https://docs.aws.amazon.com/lightsail/latest/userguide/understanding-firewall-and-port-mappings-in-amazon-lightsail.html>.
 ///
 /// The IPv6 side of each rule is present only when the instance has an IPv6
 /// address at all, so the reported rules match the addresses the instance has.
@@ -199,8 +200,13 @@ pub fn default_port_rules(blueprint_id: &str, ip_address_type: &str) -> Vec<Stor
         SSH_PORT
     };
     let (cidrs, ipv6_cidrs) = anywhere_cidrs(ip_address_type);
+    let cms_https = matches!(
+        blueprint_id,
+        "wordpress" | "wordpress_multisite" | "ghost_bitnami" | "joomla" | "prestashop" | "drupal"
+    );
     [management, HTTP_PORT]
         .into_iter()
+        .chain(cms_https.then_some(443))
         .map(|port| StoredPortRule {
             from_port: port,
             to_port: port,

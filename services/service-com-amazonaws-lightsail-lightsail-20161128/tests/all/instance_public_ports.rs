@@ -1585,3 +1585,29 @@ async fn the_families_a_rule_may_name_follow_the_instances_current_address_type(
     upsert(&mut want, Rule::new(443, 443, "tcp", &["0.0.0.0/0"], &[]));
     assert_firewall(&emulator, "an accepted open on a narrowed instance", name, &want).await;
 }
+
+/// CMS images open HTTPS in both control-plane views, unlike base Linux images.
+#[tokio::test]
+async fn cms_default_https_is_scoped_to_the_instance_and_address_family() {
+    let emulator = Emulator::new();
+    create_instance(&emulator, "base-os", None).await;
+    for (name, blueprint, family, ipv4, ipv6) in [
+        ("wordpress-dual", "wordpress", "dualstack", &["0.0.0.0/0"][..], &["::/0"][..]),
+        ("wordpress-v4", "wordpress", "ipv4", &["0.0.0.0/0"][..], &[][..]),
+        ("multisite", "wordpress_multisite", "ipv4", &["0.0.0.0/0"][..], &[][..]),
+        ("ghost", "ghost_bitnami", "ipv4", &["0.0.0.0/0"][..], &[][..]),
+        ("joomla", "joomla", "ipv4", &["0.0.0.0/0"][..], &[][..]),
+        ("prestashop", "prestashop", "ipv4", &["0.0.0.0/0"][..], &[][..]),
+        ("drupal", "drupal", "ipv4", &["0.0.0.0/0"][..], &[][..]),
+    ] {
+        emulator.ok("CreateInstances", json!({
+            "instanceNames": [name], "availabilityZone": ZONE,
+            "blueprintId": blueprint, "bundleId": BUNDLE, "ipAddressType": family,
+        })).await;
+        let mut expected = default_rules(family);
+        expected.push(Rule::new(443, 443, "tcp", ipv4, ipv6));
+        expected.sort();
+        assert_firewall(&emulator, name, name, &expected).await;
+        assert_firewall(&emulator, name, "base-os", &default_rules("dualstack")).await;
+    }
+}

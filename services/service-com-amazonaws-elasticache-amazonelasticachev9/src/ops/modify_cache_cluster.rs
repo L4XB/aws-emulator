@@ -953,7 +953,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        let withdraw_single_member = cluster.engine.eq_ignore_ascii_case("memcached") && cluster.num_cache_nodes > 1;
+        if withdraw_single_member {
+            for member in &mut cluster.nodes {
+                member.endpoint_address = format!("{}-{}.{}.{}.cache.amazonaws.com", cluster.cache_cluster_id,
+                    member.cache_node_id, cluster.dns_token, cluster.region);
+                member.endpoint_port = cluster.endpoint_port;
+            }
+        }
         let cache_cluster = cluster.to_modeled(true);
+        if withdraw_single_member {
+            crate::state::close_cache_cluster_data_plane(&mut store, &cache_cluster_id, None);
+        }
         // Modifying a cluster is one of the events this service records; see
         // `crate::state::EventRecord`. The published events the changes this call
         // APPLIED raise go with it, so the cluster's notification topic is told

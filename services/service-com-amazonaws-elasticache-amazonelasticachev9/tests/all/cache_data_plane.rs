@@ -331,9 +331,7 @@ async fn a_cache_is_reached_at_the_address_it_publishes() {
 
 #[tokio::test]
 async fn a_memcached_cluster_publishes_the_name_its_own_clients_resolve() {
-    // The counter-case to the rule: this emulator serves no Memcached wire, so a Memcached
-    // cluster keeps the name ElastiCache's own zone would carry rather than publishing a
-    // port that would answer the wrong protocol.
+    // Multi-node Memcached retains service DNS for each member.
     let emulator = Emulator::new();
     let (address, port) = cluster_endpoint(
         &emulator,
@@ -1444,4 +1442,54 @@ async fn the_socket_a_cache_was_served_on_closes_with_the_cache() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+
+#[tokio::test]
+async fn memcached_member_receipts_are_isolated_and_end_with_the_cluster() {
+    use tokio::time::{timeout, Duration};
+    async fn expect(session: &mut Session, request: &[u8], expected: &[u8]) {
+        session.write_all(request).await.unwrap();
+        let mut reply = vec![0; expected.len()];
+        timeout(Duration::from_secs(3), session.read_exact(&mut reply)).await.unwrap().unwrap();
+        assert_eq!(reply, expected);
+    }
+    let emulator = Emulator::new();
+    let cfg = &[("Engine", "memcached"), ("NumCacheNodes", "1")];
+    let (host, port) = cluster_endpoint(&emulator, "mc-first", cfg).await;
+    let (peer, peer_port) = cluster_endpoint(&emulator, "mc-peer", cfg).await;
+    assert_ne!(port, peer_port);
+    async fn generation(emulator: &Emulator) -> (String, String) {
+        let reply = emulator.call("DescribeCacheClusters", &params(&[
+            ("CacheClusterId","mc-first"),("ShowCacheNodeInfo","true")
+        ])).await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.text("CacheNode/CacheNodeId"), Some("0001"));
+        (reply.text("CacheCluster/CacheClusterCreateTime").unwrap().into(),
+         reply.text("CacheNode/CacheNodeCreateTime").unwrap().into())
+    }
+    let first_generation = generation(&emulator).await;
+    let mut first = open("first", &host, &port).await;
+    let mut second = open("peer", &peer, &peer_port).await;
+    expect(&mut first, b"version\r\n", b"VERSION emulator-memcached-1\r\n").await;
+    expect(&mut first, b"set marker 13 60 4\r\na\0bc\r\n", b"STORED\r\n").await;
+    expect(&mut first, b"get marker\r\n", b"VALUE marker 13 4\r\na\0bc\r\nEND\r\n").await;
+    expect(&mut second, b"get marker\r\n", b"END\r\n").await;
+    expect(&mut first, b"add marker 0 60 1\r\nx\r\n", b"NOT_STORED\r\n").await;
+    expect(&mut second, b"add marker 0 60 1\r\ny\r\n", b"STORED\r\n").await;
+    expect(&mut second, b"delete marker\r\n", b"DELETED\r\n").await;
+    expect(&mut second, b"get marker\r\n", b"END\r\n").await;
+
+    let params = params(&[("CacheClusterId", "mc-first")]);
+    assert_eq!(emulator.call("DeleteCacheCluster", &params).await.status, 200);
+    poll_until(&emulator, REGION, "mc-first", "cluster disappearance", "DescribeCacheClusters",
+               &params, |reply| reply.status == 404).await;
+    assert!(TcpStream::connect((host.as_str(), port.parse::<u16>().unwrap())).await.is_err());
+    let mut byte = [0; 1];
+    let closed = timeout(Duration::from_secs(3), first.read(&mut byte)).await.unwrap();
+    assert!(matches!(closed, Ok(0) | Err(_)));
+    let (next_host, next_port) = cluster_endpoint(&emulator, "mc-first", cfg).await;
+    assert_ne!(first_generation, generation(&emulator).await);
+    let mut replacement = open("replacement", &next_host, &next_port).await;
+    expect(&mut replacement, b"get marker\r\n", b"END\r\n").await;
+    expect(&mut second, b"version\r\n", b"VERSION emulator-memcached-1\r\n").await;
 }

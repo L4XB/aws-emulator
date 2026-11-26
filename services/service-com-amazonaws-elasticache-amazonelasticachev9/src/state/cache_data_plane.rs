@@ -26,9 +26,8 @@
 //! * a SERVERLESS CACHE gets one, always TLS, because that is the only way ElastiCache
 //!   serves one.
 //!
-//! A Memcached cache gets none: its clients speak the Memcached text protocol, not RESP, so
-//! this emulator has nothing to answer them with and keeps the name ElastiCache's own zone
-//! would give it rather than publishing a port that would answer the wrong protocol.
+//! A standalone single-node plaintext Memcached cluster serves a bounded ASCII protocol
+//! on loopback. Other Memcached configurations retain their service DNS endpoint.
 //!
 //! The socket's life is the cache's: the handle lives on the store under the cache's own
 //! key, and dropping it (the delete) closes the port and severs every connection on it.
@@ -43,6 +42,7 @@
 pub mod access_control;
 pub mod commands;
 pub mod keyspace;
+mod memcached_wire;
 pub mod resp_frame;
 pub mod resp_wire;
 pub mod slow_log;
@@ -891,18 +891,43 @@ pub async fn serve_cache_cluster_holding<Eng: Send + Sync + 'static>(
     let identity = CacheIdentity::CacheCluster {
         cache_cluster_id: cache_cluster_id.to_string(),
     };
-    let tls = {
+    let (tls, memcached, token) = {
         let store = state.lock();
-        let Some(cluster) = store.cache_clusters.get(cache_cluster_id) else {
-            return;
-        };
-        if !engine_speaks_resp(&cluster.engine)
-            || store.cache_data_planes.get(&identity).is_some()
-        {
+        let Some(cluster) = store.cache_clusters.get(cache_cluster_id) else { return };
+        let tls = cluster.transit_encryption_enabled.unwrap_or(false);
+        let memcached = cluster.engine.eq_ignore_ascii_case("memcached") && !tls
+            && cluster.num_cache_nodes == 1 && cluster.replication_group_id.is_none()
+            && cluster.auth_token_digests.is_empty();
+        if (!memcached && !engine_speaks_resp(&cluster.engine)) || store.cache_data_planes.get(&identity).is_some() {
             return;
         }
-        cluster.transit_encryption_enabled.unwrap_or(false)
+        (tls, memcached, cluster.dns_token.clone())
     };
+    if memcached {
+        let Some(shared) = (engine as &dyn std::any::Any).downcast_ref::<::engine::InMemoryEngine>() else { return };
+        let listeners = shared.listeners();
+        let opened = tokio::spawn(async move {
+            listeners.tcp_plaintext_loopback(memcached_wire::Wire::default()).await
+        }).await;
+        let Ok(Ok(listener)) = opened else { return };
+        let mut store = state.lock();
+        if store.cache_data_planes.get(&identity).is_some() { return; }
+        let Some(cluster) = store.cache_clusters.get_mut(cache_cluster_id) else { return };
+        if cluster.dns_token != token || cluster.status == "deleting" || cluster.num_cache_nodes != 1 { return; }
+        let plane = CacheDataPlane {
+            endpoint: ServedEndpoint { host: listener.host(), port: i32::from(listener.port()) },
+            keyspace: Arc::new(Mutex::new(Keyspace::default())),
+            _listener: listener,
+            _dialable: None,
+        };
+        // The ASCII subset serves this actual member, not Memcached Auto Discovery.
+        // Keep the original configuration endpoint and requested engine port intact.
+        let [member] = cluster.nodes.as_mut_slice() else { return };
+        member.endpoint_address = plane.endpoint().host.clone();
+        member.endpoint_port = plane.endpoint().port;
+        store.cache_data_planes.insert(&identity, plane);
+        return;
+    }
     let Some(plane) = open_cache_data_plane(engine, state, identity.clone(), tls, keyspace).await
     else {
         return;

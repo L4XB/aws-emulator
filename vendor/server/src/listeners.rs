@@ -217,7 +217,7 @@ impl Listeners {
     ) -> Result<ResourceListener, SurfaceError> {
         let server_config = Arc::new(self.rustls_server_config()?);
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-        serve_native(handler, idle, Some(acceptor)).await
+        serve_native(handler, idle, Some(acceptor), bind_ip_from_env()?).await
     }
 
     /// Open a native-protocol (TCP) listener that hands the RAW, unencrypted
@@ -231,7 +231,17 @@ impl Listeners {
         &self,
         handler: H,
     ) -> Result<ResourceListener, SurfaceError> {
-        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None).await
+        serve_native(handler, Duration::from_secs(caps::IDLE_TIMEOUT_SECS), None, bind_ip_from_env()?).await
+    }
+
+    /// Open a private IPv4 loopback listener irrespective of the configured public interface.
+    pub async fn tcp_plaintext_loopback<H: NativeHandler>(&self, handler: H) -> Result<ResourceListener, SurfaceError> {
+        serve_native(
+            handler,
+            Duration::from_secs(caps::IDLE_TIMEOUT_SECS),
+            None,
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        ).await
     }
 }
 
@@ -285,10 +295,11 @@ async fn serve_native<H: NativeHandler>(
     handler: H,
     idle: Duration,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    bind_ip: IpAddr,
 ) -> Result<ResourceListener, SurfaceError> {
     {
         let acceptor = tls;
-        let listener = bind_tokio(bind_ip_from_env()?, listener_port_range_from_env()?).await?;
+        let listener = bind_tokio(bind_ip, listener_port_range_from_env()?).await?;
         let addr = listener.local_addr().map_err(|e| SurfaceError::Bind(e.to_string()))?;
 
         let handler = Arc::new(handler);

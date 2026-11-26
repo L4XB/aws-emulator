@@ -542,7 +542,7 @@ fn destination_description(destination: &crate::state::Destination) -> Destinati
                 s3_destination_description: Some(s3_description(&config.s3_configuration)),
                 processing_configuration: config.processing_configuration.clone(),
                 cloud_watch_logging_options: logging(&config.cloud_watch_logging_options),
-                vpc_configuration_description: None,
+                vpc_configuration_description: destination.search_vpc.clone(),
                 document_id_options: config.document_id_options.clone(),
             }),
             ..rendered
@@ -567,7 +567,7 @@ fn destination_description(destination: &crate::state::Destination) -> Destinati
                     s3_destination_description: Some(s3_description(&config.s3_configuration)),
                     processing_configuration: config.processing_configuration.clone(),
                     cloud_watch_logging_options: logging(&config.cloud_watch_logging_options),
-                    vpc_configuration_description: None,
+                    vpc_configuration_description: destination.search_vpc.clone(),
                     document_id_options: config.document_id_options.clone(),
                 },
             ),

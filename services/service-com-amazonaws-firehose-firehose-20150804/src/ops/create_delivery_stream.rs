@@ -433,6 +433,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(invalid_argument(message));
         }
 
+        let search_vpc = match &destination {
+            crate::state::DestinationConfigKind::Elasticsearch(config) => {
+                config.vpc_configuration.as_ref()
+            }
+            crate::state::DestinationConfigKind::AmazonOpenSearchService(config) => {
+                config.vpc_configuration.as_ref()
+            }
+            _ => None,
+        };
+        let search_vpc = if let Some(config) = search_vpc {
+            let placements = service_com_amazonaws_opensearch_amazonopensearchservice::state::vpc_network::resolve_subnets(
+                ctx, &region, &config.subnet_ids,
+            ).await;
+            search_vpc_description(config, &placements)
+        } else {
+            None
+        };
+
         let mut store = state.lock();
         store.materialise_due(now);
 
@@ -505,6 +523,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         stream.destinations.push(crate::state::Destination {
             destination_id,
             config: destination,
+            search_vpc,
         });
         store.streams.insert(input.delivery_stream_name.clone(), stream);
         // Whether the created stream is fed by a source, read off the stored record before
@@ -1111,3 +1130,60 @@ fn encryption_configuration(
 }
 
 
+
+/// A description requires the actual VPC ID, which the Firehose request does not carry.
+fn search_vpc_description(
+    config: &VpcConfiguration,
+    placements: &[service_com_amazonaws_opensearch_amazonopensearchservice::state::vpc_network::SubnetPlacement],
+) -> Option<VpcConfigurationDescription> {
+    let vpc_id = placements.first()?.vpc_id.as_ref()?;
+    if !config.subnet_ids.iter().all(|id| {
+        placements
+            .iter()
+            .any(|subnet| subnet.subnet_id == *id && subnet.vpc_id.as_ref() == Some(vpc_id))
+    }) {
+        return None;
+    }
+    Some(VpcConfigurationDescription {
+        subnet_ids: config.subnet_ids.clone(),
+        security_group_ids: config.security_group_ids.clone(),
+        role_arn: config.role_arn.clone(),
+        vpc_id: vpc_id.clone(),
+    })
+}
+
+#[cfg(test)]
+mod search_vpc_tests {
+    use super::*;
+    use service_com_amazonaws_opensearch_amazonopensearchservice::state::vpc_network::SubnetPlacement;
+
+    #[test]
+    fn search_vpc_readback_requires_complete_single_vpc_placement() {
+        let configuration = VpcConfiguration {
+            subnet_ids: vec!["subnet-a".into(), "subnet-b".into()],
+            security_group_ids: vec!["sg-a".into()],
+            role_arn: "arn:aws:iam::000000000000:role/search".into(),
+        };
+        let subnet = |id: &str, vpc: &str| SubnetPlacement {
+            subnet_id: id.into(),
+            vpc_id: Some(vpc.into()),
+            availability_zone: None,
+        };
+        let local = subnet("subnet-a", "vpc-local");
+        let other = subnet("subnet-b", "vpc-local");
+        let observed = search_vpc_description(&configuration, &[other, local.clone()]).unwrap();
+        assert_eq!(observed.vpc_id, "vpc-local");
+        assert_eq!(observed.subnet_ids, configuration.subnet_ids);
+        assert_eq!(
+            observed.security_group_ids,
+            configuration.security_group_ids
+        );
+        assert_eq!(observed.role_arn, configuration.role_arn);
+        assert!(search_vpc_description(&configuration, std::slice::from_ref(&local)).is_none());
+        assert!(
+            search_vpc_description(&configuration, &[local, subnet("subnet-b", "vpc-peer")])
+                .is_none()
+        );
+        assert!(search_vpc_description(&configuration, &[]).is_none());
+    }
+}

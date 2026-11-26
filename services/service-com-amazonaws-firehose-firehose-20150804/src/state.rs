@@ -620,6 +620,8 @@ pub struct Destination {
     /// `DestinationId`, as Firehose formats it: `destinationId-` plus a zero-padded ordinal.
     pub destination_id: String,
     pub config: DestinationConfigKind,
+    /// Placement of a search destination, resolved from its subnet identities at creation.
+    pub search_vpc: Option<crate::ops::types::VpcConfigurationDescription>,
 }
 
 /// A record `PutRecord` / `PutRecordBatch` appended to a stream's buffer.

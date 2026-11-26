@@ -628,3 +628,59 @@ async fn a_forward_to_an_instance_target_is_answered_by_the_server_that_instance
         dialed.raw
     );
 }
+
+/// A socket client receives the two independently provisioned guest documents;
+/// removing the second registration leaves only the first document reachable.
+#[tokio::test]
+async fn two_registered_guest_markers() {
+    let router = emulator_with_ec2();
+    let network = seed_network(&router).await;
+    let group = target_group(&router, "paired", "paired", "instance", &network).await;
+    let mut instances = Vec::new();
+    for (address, marker) in [("10.80.1.10", "guest-alpha"), ("10.80.1.11", "guest-beta")] {
+        let id = run_instance(
+            &router,
+            marker,
+            &network,
+            address,
+            Some(serving_user_data().replace(MARKER, marker)),
+        )
+        .await;
+        running(&router, marker, &id).await;
+        register(&router, marker, &group, &id, TRAFFIC_PORT).await;
+        instances.push(id);
+    }
+    assert_ne!(instances[0], instances[1]);
+    let (arn, dns) = load_balancer(&router, "paired", "paired-alb", &network, &group, false).await;
+    active(&router, "paired", &arn).await;
+    health_reaching(&router, "paired", &group, "healthy").await;
+    let mut observed = Vec::new();
+    for _ in 0..20 {
+        let response = exchange("paired", &dns, "/").await;
+        assert_eq!(response.status, 200);
+        let body = response.raw.split_once("\r\n\r\n").unwrap().1.trim();
+        assert!(matches!(
+            body,
+            "<h1>guest-alpha</h1>" | "<h1>guest-beta</h1>"
+        ));
+        observed.push(body.to_owned());
+    }
+    println!("ALB paired group {group}, instances {instances:?}, authority {dns}, returned bodies {observed:?}");
+    assert!(
+        observed.windows(2).all(|pair| pair[0] != pair[1]),
+        "{observed:?}"
+    );
+    let mut form = action("DeregisterTargets");
+    form.push(p("TargetGroupArn", &group));
+    form.push(p("Targets.member.1.Id", &instances[1]));
+    form.push(p("Targets.member.1.Port", "80"));
+    assert_eq!(call(&router, &form).await.status, 200);
+    for _ in 0..4 {
+        let response = exchange("single remaining", &dns, "/").await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.raw.split_once("\r\n\r\n").unwrap().1.trim(),
+            "<h1>guest-alpha</h1>"
+        );
+    }
+}

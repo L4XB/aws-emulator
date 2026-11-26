@@ -2697,6 +2697,8 @@ pub struct TargetGroupRecord {
     /// Registrations keyed by target id and effective port, so registering the same
     /// id on two ports keeps two registrations and re-registering one replaces it.
     pub targets: BTreeMap<TargetKey, RegisteredTarget>,
+    /// Runtime cursor shared by views of this group, reset on creation.
+    pub(crate) round_robin_cursor: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl TargetGroupRecord {

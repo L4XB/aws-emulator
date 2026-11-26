@@ -2107,6 +2107,22 @@ fn forward(
     let Some((group, target, _)) = chosen.and_then(|index| candidates.get(index)) else {
         return Performed::Answered(Served::status(NO_HEALTHY_TARGET_STATUS));
     };
+    // Group weights and group cookies select the group first. Only its own cursor advances.
+    let target = if group.family() == crate::state::LoadBalancerFamily::Application
+        && matches!(group.target_type.as_str(), "instance" | "ip")
+        && group.attributes.get("load_balancing.algorithm.type").is_none_or(|value| value == "round_robin")
+        && !group.attributes.get("stickiness.enabled").is_some_and(|value| value == "true")
+        && group.targets.len() > 1
+    {
+        // Preserve the selection priority of sent_the_request: only rotate among
+        // fail-open registrations if the chosen group has no normally eligible target.
+        let eligible = if receives_requests(group, target, now) { receives_requests } else { fails_open_to };
+        let members: Vec<_> = group.targets.values().filter(|entry| eligible(group, entry, now)).collect();
+        let turn = group.round_robin_cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        members[turn % members.len()]
+    } else {
+        *target
+    };
     if group.is_lambda() {
         // "lambda - Register a single Lambda function as a target": the registration holds
         // the function's ARN, and the request is served by invoking it.

@@ -239,7 +239,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `ErrorMessage` reports why an index reached `FAILED`; nothing in this
             // emulator fails an index.
             error_message: None,
-            capacity_units: None,
+            capacity_units: index.capacity_units.clone(),
             user_token_configurations: index.user_token_configurations.clone(),
             user_context_policy: index.user_context_policy.clone(),
             user_group_resolution_configuration: index

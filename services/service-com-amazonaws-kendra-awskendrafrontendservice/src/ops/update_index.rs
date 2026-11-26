@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateIndex
-//! Metadata-only configuration is implemented. Other update dimensions are outside the fixture.
+//! Stores explicit document metadata and Enterprise Edition capacity settings.
 //! Historical scaffold: this operation answers HTTP 501 `NotImplemented` and
 //! asserts NOTHING about `UpdateIndex`'s real behaviour. Implement it here — this is
 //! the ONLY file to touch for this operation.
@@ -9,7 +9,7 @@
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken". Replace the `Err(..)` in [`UpdateIndex::handle`] with real behaviour and
 //! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! Metadata-only configuration is implemented. Other update dimensions are outside the fixture.
+//! which operations are still stubs (`grep -rl '^//! Stores explicit document metadata and Enterprise Edition capacity settings.
 //! Historical scaffold:' */src/ops/`),
 //! so leaving it on an implemented operation under-reports progress.
 //!
@@ -216,20 +216,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if input.name.is_some()
             || input.role_arn.is_some()
             || input.description.is_some()
-            || input.capacity_units.is_some()
             || input.user_token_configurations.is_some()
             || input.user_context_policy.is_some()
             || input.user_group_resolution_configuration.is_some()
         {
             return Err(crate::scaffolded::Scaffolded::not_implemented(
-                "non-metadata index updates",
+                "unsupported index update fields",
             ));
         }
-        let updates = input
-            .document_metadata_configuration_updates
-            .ok_or_else(|| {
-                crate::scaffolded::Scaffolded::validation("metadata updates required")
-            })?;
+        if input.document_metadata_configuration_updates.is_none() && input.capacity_units.is_none() {
+            return Err(crate::scaffolded::Scaffolded::validation("an index update is required"));
+        }
+        let updates = input.document_metadata_configuration_updates.unwrap_or_default();
         let store = crate::state::service_state(&*self.engine).ok_or_else(|| {
             UpdateIndexErrorModeled::InternalServerException(InternalServerException {
                 message: Some("Kendra state unavailable".into()),
@@ -251,6 +249,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         }
+        if let Some(units) = &input.capacity_units {
+            if index.edition != "ENTERPRISE_EDITION"
+                || !(0..=100).contains(&units.storage_capacity_units)
+                || !(0..=100).contains(&units.query_capacity_units)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation(
+                    "capacity updates require an Enterprise index and 0 to 100 additional units",
+                ));
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for field in &updates {
             if !seen.insert(&field.name)
@@ -271,6 +279,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         for field in updates {
             index.metadata_overrides.insert(field.name.clone(), field);
+        }
+        if let Some(units) = input.capacity_units {
+            index.capacity_units = Some(units);
         }
         index.updated_at = now;
         Ok(UpdateIndexOutput)

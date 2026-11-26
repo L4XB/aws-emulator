@@ -1519,3 +1519,67 @@ async fn web_crawler_configuration_is_owned_by_one_parent_index() {
     tokio::time::sleep(Duration::from_millis(550)).await;
     assert_eq!(call(&router, "DescribeDataSource", key).await.0, 404);
 }
+
+#[tokio::test]
+async fn capacity_updates_roundtrip_on_the_selected_enterprise_index() {
+    let router = kendra();
+    let mut ids = Vec::new();
+    for (name, edition) in [
+        ("capacity-a", "ENTERPRISE_EDITION"),
+        ("capacity-b", "ENTERPRISE_EDITION"),
+        ("capacity-dev", "DEVELOPER_EDITION"),
+    ] {
+        let (status, created) = call(
+            &router,
+            "CreateIndex",
+            json!({"Name":name, "Edition":edition, "RoleArn":ROLE_ARN}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let id = created["Id"].as_str().unwrap().to_owned();
+        wait_until_active(&router, &id).await;
+        let (status, row) = call(&router, "DescribeIndex", json!({"Id":id})).await;
+        assert_eq!(status, 200);
+        assert!(row.get("CapacityUnits").is_none());
+        ids.push(id);
+    }
+
+    let units = |s: i32, q: i32| json!({"StorageCapacityUnits":s,"QueryCapacityUnits":q});
+    for (i, capacity) in [(0, units(1, 3)), (1, units(3, 1))] {
+        let (status, _) = call(
+            &router,
+            "UpdateIndex",
+            json!({"Id":ids[i],"CapacityUnits":capacity}),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    for (i, capacity) in [(2, units(1, 3)), (0, units(101, 1)), (1, units(0, -1))] {
+        let (status, error) = call(
+            &router,
+            "UpdateIndex",
+            json!({"Id":ids[i],"CapacityUnits":capacity}),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(error_code(&error), "ValidationException");
+    }
+    for (i, capacity) in [(0, Some(units(1, 3))), (1, Some(units(3, 1))), (2, None)] {
+        let (status, row) = call(&router, "DescribeIndex", json!({"Id":ids[i]})).await;
+        assert_eq!(status, 200);
+        assert_eq!(row["Id"], ids[i]);
+        assert_eq!(row.get("CapacityUnits"), capacity.as_ref());
+    }
+    let (status, _) = call(
+        &router,
+        "UpdateIndex",
+        json!({"Id":ids[0],"CapacityUnits":units(0,0)}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    for (i, capacity) in [(0, units(0, 0)), (1, units(3, 1))] {
+        let (status, row) = call(&router, "DescribeIndex", json!({"Id":ids[i]})).await;
+        assert_eq!(status, 200);
+        assert_eq!(row["CapacityUnits"], capacity);
+    }
+}

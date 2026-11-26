@@ -263,6 +263,8 @@ pub struct Index {
     /// The `ClientToken` of the `CreateIndex` call that minted this index, so a
     /// retry with the same token answers with this same `Id`.
     pub client_token: Option<String>,
+    /// Explicit additional capacity most recently configured by UpdateIndex.
+    pub capacity_units: Option<crate::ops::types::CapacityUnitsConfiguration>,
     pub metadata_overrides:
         std::collections::BTreeMap<String, crate::ops::types::DocumentMetadataConfiguration>,
     pub documents: HashMap<String, StoredDocument>,

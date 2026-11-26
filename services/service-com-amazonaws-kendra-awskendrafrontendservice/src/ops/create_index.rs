@@ -323,6 +323,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             user_group_resolution_configuration: input.user_group_resolution_configuration.clone(),
             client_token: input.client_token.clone(),
             data_sources: Default::default(),
+            capacity_units: None,
             metadata_overrides: Default::default(),
             documents: ::std::collections::HashMap::new(),
             faq_count: 0,

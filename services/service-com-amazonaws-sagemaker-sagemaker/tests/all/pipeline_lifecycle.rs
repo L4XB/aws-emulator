@@ -276,10 +276,7 @@ async fn an_unresolvable_definition_is_refused_and_persists_nothing() {
             "depends-on-is-not-a-list",
             definition(json!([{ "Name": "Only", "Type": "Fail", "DependsOn": "Other" }])),
         ),
-        (
-            "self-cycle",
-            definition(json!([step("Loop", &["Loop"])])),
-        ),
+        ("self-cycle", definition(json!([step("Loop", &["Loop"])]))),
         (
             "two-step-cycle",
             definition(json!([step("Ping", &["Pong"]), step("Pong", &["Ping"])])),
@@ -327,9 +324,7 @@ async fn an_unresolvable_definition_is_refused_and_persists_nothing() {
 }
 
 /// RULE: exactly one definition source is acted on — the inline `PipelineDefinition` is
-/// read, neither source or both is refused with 400 `ValidationException`, and the
-/// `PipelineDefinitionS3Location` form is not implemented, so it answers the scaffold's
-/// 501 rather than persisting a pipeline with no definition.
+/// read, and requests with both or neither source are rejected.
 #[tokio::test]
 async fn the_definition_source_decides_what_the_create_does() {
     let emulator = Emulator::new();
@@ -337,7 +332,7 @@ async fn the_definition_source_decides_what_the_create_does() {
     let inline = definition(json!([step("Only", &[])]));
     let s3 = json!({ "Bucket": "pipeline-definitions", "ObjectKey": "demo/definition.json" });
 
-    // Rows: inline only, S3 only, both, neither.
+    // Rows: inline only, both, neither.
     let cases: Vec<(&str, Value, u16, &str)> = vec![
         (
             "inline-only",
@@ -349,17 +344,6 @@ async fn the_definition_source_decides_what_the_create_does() {
             }),
             200,
             "",
-        ),
-        (
-            "s3-only",
-            json!({
-                "PipelineName": "s3-only",
-                "PipelineDefinitionS3Location": s3,
-                "ClientRequestToken": token("s3-only"),
-                "RoleArn": role,
-            }),
-            501,
-            "NotImplemented",
         ),
         (
             "both-sources",
@@ -917,4 +901,37 @@ async fn a_definition_past_the_step_or_dependency_bound_is_refused() {
             );
         }
     }
+}
+
+/// The registered pipeline retains the object bytes selected at creation.
+#[tokio::test]
+async fn stored_definition_is_resolved_once_and_missing_objects_are_rejected() {
+    let api = super::model_artifact_admission::Emulator::new();
+    let bucket = "pipeline-definitions";
+    let key = "definitions/pipeline.json";
+    let body = definition(json!([step("Stored", &[])]));
+    api.given_bucket(bucket).await;
+    api.given_object(bucket, key, &body).await;
+    let mut request = json!({
+        "PipelineName": "stored",
+        "RoleArn": format!("arn:aws:iam::{ACCOUNT}:role/local"),
+        "ClientRequestToken": token("stored"),
+        "PipelineDefinitionS3Location": {"Bucket": bucket, "ObjectKey": key},
+    });
+    api.sagemaker_ok("stored", "CreatePipeline", &request).await;
+    api.given_object(bucket, key, "invalid").await;
+    let actual = api
+        .sagemaker_ok(
+            "stored",
+            "DescribePipeline",
+            &json!({"PipelineName":"stored"}),
+        )
+        .await;
+    assert_eq!(actual["PipelineDefinition"], body);
+    api.sagemaker_ok("retry", "CreatePipeline", &request).await;
+    request["PipelineName"] = json!("missing");
+    request["PipelineDefinitionS3Location"]["ObjectKey"] = json!("missing.json");
+    let (status, reply) = api.sagemaker("CreatePipeline", &request).await;
+    assert_eq!(status, 400);
+    assert_eq!(error_code(&reply), "ResourceNotFound");
 }

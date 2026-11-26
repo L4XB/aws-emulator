@@ -9,10 +9,7 @@
 //! diagnosis (see [`crate::state::pipeline_definition_violation`]), so a caller can tell
 //! one from another. This is the ONLY file to touch for this operation.
 //!
-//! A definition handed in through `PipelineDefinitionS3Location` is the one input path
-//! left unimplemented: it needs the definition fetched from S3, which nothing here does
-//! yet, so that form answers the scaffold's 501 rather than persisting a pipeline with
-//! no definition.
+//! S3 definitions are resolved during creation and stored with the same validation as inline definitions.
 //!
 //! The `RoleArn` is admitted on its modelled shape alone: creating a pipeline registers a
 //! definition and assumes nothing, so a role nothing holds yet is stored as given and
@@ -160,8 +157,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     type Error = CreatePipelineError;
 
     const NAME: &'static str = "CreatePipeline";
-    const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_PIPELINE_INPUT_SCHEMA;
-    const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::CREATE_PIPELINE_OUTPUT_SCHEMA;
+    const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema =
+        super::types::CREATE_PIPELINE_INPUT_SCHEMA;
+    const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema =
+        super::types::CREATE_PIPELINE_OUTPUT_SCHEMA;
     const SUCCESS_STATUS: u16 = 200u16;
 
     async fn handle(
@@ -176,16 +175,66 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // inline `PipelineDefinition`, or retrieves one from
         // `PipelineDefinitionS3Location`. Neither, or both, is a request the service
         // cannot act on.
-        let definition = match (&input.pipeline_definition, &input.pipeline_definition_s3_location)
-        {
+        let definition = match (
+            &input.pipeline_definition,
+            &input.pipeline_definition_s3_location,
+        ) {
             (Some(definition), None) => definition.clone(),
-            (None, Some(_)) => {
-                // Honest about the gap: retrieving the definition from S3 is not written
-                // yet, and a 200 here would persist a pipeline whose definition nothing
-                // ever read.
-                return Err(crate::scaffolded::Scaffolded::not_implemented(
-                    "CreatePipeline with PipelineDefinitionS3Location",
-                ));
+            (None, Some(location)) => {
+                // A retry of a successful create refers to the registered generation, even
+                // when the source object has since changed or disappeared.
+                if let Some(existing) = state.lock().pipelines.get(&input.pipeline_name) {
+                    if existing.client_request_token == input.client_request_token {
+                        return Ok(CreatePipelineOutput {
+                            pipeline_arn: Some(existing.arn.clone()),
+                        });
+                    }
+                }
+                let region = crate::state::request_region(ctx);
+                let client = crate::state::s3_client(ctx, &region);
+                let response = client
+                    .get_object()
+                    .bucket(&location.bucket)
+                    .key(&location.object_key)
+                    .set_version_id(location.version_id.clone())
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        match error
+                            .as_service_error()
+                            .and_then(::aws_sdk_s3::error::ProvideErrorMetadata::code)
+                        {
+                            Some("NoSuchBucket" | "NoSuchKey" | "NoSuchVersion" | "NotFound") => {
+                                CreatePipelineErrorModeled::ResourceNotFound(ResourceNotFound {
+                                    message: Some(
+                                        "Pipeline definition object was not found".into(),
+                                    ),
+                                })
+                                .into()
+                            }
+                            _ => crate::scaffolded::Scaffolded::validation(
+                                "Cannot read the pipeline definition object",
+                            ),
+                        }
+                    })?;
+                let mut stream = response.body;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| {
+                        crate::scaffolded::Scaffolded::validation(
+                            "Incomplete pipeline definition object",
+                        )
+                    })?;
+                    if chunk.len() > 1_048_576 - bytes.len() {
+                        return Err(crate::scaffolded::Scaffolded::validation(
+                            "Pipeline definition exceeds the maximum size",
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                String::from_utf8(bytes).map_err(|_| {
+                    crate::scaffolded::Scaffolded::validation("Pipeline definition must be UTF-8")
+                })?
             }
             (Some(_), Some(_)) => {
                 return Err(crate::scaffolded::Scaffolded::validation(
@@ -250,17 +299,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The store is bounded, so a caller varying `PipelineName` cannot grow it without
         // end. `ResourceLimitExceeded` is the limit failure this operation models.
         if !store.pipelines_below_quota() {
-            return Err(CreatePipelineErrorModeled::ResourceLimitExceeded(
-                ResourceLimitExceeded {
+            return Err(
+                CreatePipelineErrorModeled::ResourceLimitExceeded(ResourceLimitExceeded {
                     message: Some(format!(
                         "The account-level service limit for pipelines is {}, with current \
                          utilization of {} and a request delta of 1.",
                         crate::state::PIPELINE_QUOTA,
                         store.pipelines.len()
                     )),
-                },
-            )
-            .into());
+                })
+                .into(),
+            );
         }
 
         store.pipelines.insert(

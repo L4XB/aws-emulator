@@ -1747,6 +1747,15 @@ impl ComAmazonawsLexmodelsv2Lexmodelbuildingservicev2State {
             reasons.push(no_utterances_failure_reason(locale_id));
         }
         for intent in intents {
+            let mut missing_types: Vec<_> = self.slots_in_intent(bot_id, bot_version, locale_id, &intent.intent_id)
+                .filter_map(|slot| {
+                    let id = slot.slot_type_id.as_deref()?;
+                    (!self.slot_type_resolves(bot_id, bot_version, locale_id, id)).then_some((&slot.slot_name, id))
+                }).collect();
+            missing_types.sort();
+            for (slot_name, id) in missing_types {
+                reasons.push(format!("Slot {slot_name} in intent {} references missing slot type {id}.", intent.intent_name));
+            }
             let unordered: Vec<String> = self
                 .unprioritised_slots(intent)
                 .into_iter()

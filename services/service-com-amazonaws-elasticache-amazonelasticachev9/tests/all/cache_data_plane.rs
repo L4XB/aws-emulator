@@ -1474,6 +1474,8 @@ async fn memcached_member_receipts_are_isolated_and_end_with_the_cluster() {
     expect(&mut first, b"set marker 13 60 4\r\na\0bc\r\n", b"STORED\r\n").await;
     expect(&mut first, b"get marker\r\n", b"VALUE marker 13 4\r\na\0bc\r\nEND\r\n").await;
     expect(&mut second, b"get marker\r\n", b"END\r\n").await;
+    expect(&mut second, b"set expired 0 2592001 1\r\nz\r\n", b"STORED\r\n").await;
+    expect(&mut second, b"get expired\r\n", b"END\r\n").await;
     expect(&mut first, b"add marker 0 60 1\r\nx\r\n", b"NOT_STORED\r\n").await;
     expect(&mut second, b"add marker 0 60 1\r\ny\r\n", b"STORED\r\n").await;
     expect(&mut second, b"delete marker\r\n", b"DELETED\r\n").await;

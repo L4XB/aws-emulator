@@ -229,6 +229,10 @@ impl Captured {
 enum Answer {
     /// The acknowledgment: the success code.
     Acknowledges,
+    DisabledAck,
+    MissingId,
+    PendingOnce,
+    ForeignId,
     /// A code of the collector's own, which is what it answers for events it did not take.
     StatesAnotherCode,
     /// A JSON object stating no code at all.
@@ -277,10 +281,9 @@ impl Collector {
 
 impl HttpConnector for Collector {
     fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
-        self.captured
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Captured {
+        let captured = {
+            let mut requests = self.captured.lock().unwrap_or_else(PoisonError::into_inner);
+            requests.push(Captured {
                 method: request.method().to_string(),
                 uri: request.uri().to_string(),
                 headers: request
@@ -290,8 +293,63 @@ impl HttpConnector for Collector {
                     .collect(),
                 body: request.body().bytes().unwrap_or_default().to_vec(),
             });
+            requests.clone()
+        };
         let body = match self.answer {
-            Answer::Acknowledges => json!({ "text": "Success", "code": 0 }).to_string(),
+            Answer::Acknowledges | Answer::PendingOnce
+                if request
+                    .uri()
+                    .to_string()
+                    .ends_with("/services/collector/ack") =>
+            {
+                let poll = captured.last().expect("captured ACK query");
+                let channel = poll.header("x-splunk-request-channel");
+                let intake = captured
+                    .iter()
+                    .find(|req| {
+                        !req.uri.ends_with("/services/collector/ack")
+                            && req.header("x-splunk-request-channel") == channel
+                    })
+                    .expect("intake on poll channel");
+                assert!(intake.header("x-splunk-request-channel").is_some());
+                assert_eq!(
+                    intake.header("x-splunk-request-channel"),
+                    poll.header("x-splunk-request-channel")
+                );
+                assert_eq!(intake.header("authorization"), poll.header("authorization"));
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&poll.body).unwrap(),
+                    json!({"acks":[73]})
+                );
+                assert_eq!(
+                    poll.uri,
+                    intake
+                        .uri
+                        .replace("/services/collector/event", "/services/collector/ack")
+                );
+                let indexed = self.answer != Answer::PendingOnce
+                    || captured
+                        .iter()
+                        .filter(|req| {
+                            req.uri == poll.uri && req.header("x-splunk-request-channel") == channel
+                        })
+                        .count()
+                        > 1;
+                json!({"acks":{"73":indexed}}).to_string()
+            }
+            Answer::DisabledAck => json!({"code":14,"text":"ACK is disabled"}).to_string(),
+            Answer::MissingId => json!({"code":0}).to_string(),
+            Answer::ForeignId
+                if request
+                    .uri()
+                    .to_string()
+                    .ends_with("/services/collector/ack") =>
+            {
+                json!({"acks":{"74":true}}).to_string()
+            }
+            Answer::ForeignId | Answer::Acknowledges | Answer::PendingOnce => {
+                json!({ "text": "Success", "code": 0, "ackId": 73 }).to_string()
+            }
             Answer::StatesAnotherCode => {
                 json!({ "text": "Invalid data format", "code": 6 }).to_string()
             }
@@ -495,6 +553,24 @@ async fn only_an_answer_that_states_the_collector_took_the_events_hands_a_buffer
     // one the records are still waiting for rather than one that is parked.
     let rows = [
         AnswerRow {
+            case: "pending-then-indexed",
+            status: 200,
+            answer: Answer::PendingOnce,
+            acknowledges: true,
+        },
+        AnswerRow {
+            case: "missing-ack-id",
+            status: 200,
+            answer: Answer::MissingId,
+            acknowledges: false,
+        },
+        AnswerRow {
+            case: "only-foreign-id-confirmed",
+            status: 200,
+            answer: Answer::ForeignId,
+            acknowledges: false,
+        },
+        AnswerRow {
             case: "acknowledged",
             status: 200,
             answer: Answer::Acknowledges,
@@ -643,6 +719,12 @@ async fn events_a_splunk_collector_refused_are_parked_under_the_class_the_attemp
     // and the attempt that parks the events is made at an instant past the end of it, so what
     // classifies a row's events is its own collector's answer and nothing else.
     let rows = [
+        FailureRow {
+            case: "ack-disabled",
+            status: 400,
+            answer: Answer::DisabledAck,
+            error_code: "Splunk.DisabledAck",
+        },
         FailureRow {
             case: "token-refused",
             status: 401,

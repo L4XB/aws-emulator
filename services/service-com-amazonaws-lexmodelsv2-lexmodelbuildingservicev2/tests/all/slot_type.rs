@@ -823,3 +823,17 @@ async fn requests_outside_the_accepted_values_are_refused_and_store_nothing() {
         "a refused create must store nothing"
     );
 }
+
+#[tokio::test]
+async fn delete_slot_type_is_scoped_to_one_draft_locale() {
+    let router = emulator();
+    let owner = host_locale(&router, "DeleteOwned", "en_US").await;
+    let other = host_locale(&router, "DeletePeer", "en_US").await;
+    let id = create_slot_type(&router, &owner, "en_US", &slot_type_body("Branch", json!({}))).await;
+    let uri = slot_type_uri(&owner, "DRAFT", "en_US", &id);
+    let wrong = slot_type_uri(&other, "DRAFT", "en_US", &id);
+    call(&router, "DELETE", &wrong, None).await;
+    assert_eq!(call(&router, "GET", &uri, None).await.0, 200);
+    assert_eq!(call(&router, "DELETE", &uri, None).await.0, 204);
+    assert_eq!(call(&router, "GET", &uri, None).await.0, 404);
+}
